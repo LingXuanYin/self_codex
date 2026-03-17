@@ -72,7 +72,6 @@ use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::LoginApiKeyParams;
 use codex_app_server_protocol::LogoutAccountResponse;
-use codex_app_server_protocol::MarketplaceInterface;
 use codex_app_server_protocol::McpServerOauthLoginCompletedNotification;
 use codex_app_server_protocol::McpServerOauthLoginParams;
 use codex_app_server_protocol::McpServerOauthLoginResponse;
@@ -5728,9 +5727,7 @@ impl CodexMessageProcessor {
                     .map(|marketplace| PluginMarketplaceEntry {
                         name: marketplace.name,
                         path: marketplace.path,
-                        interface: marketplace.interface.map(|interface| MarketplaceInterface {
-                            display_name: interface.display_name,
-                        }),
+                        interface: None,
                         plugins: marketplace
                             .plugins
                             .into_iter()
@@ -5976,9 +5973,16 @@ impl CodexMessageProcessor {
                 }
             };
             let auth = self.auth_manager.auth().await;
-            plugins_manager
-                .install_plugin_with_remote_sync(&config, auth.as_ref(), request)
-                .await
+            if let Err(err) = plugins_manager.sync_plugins_from_remote(&config, auth.as_ref()).await
+            {
+                self.send_internal_error(
+                    request_id,
+                    format!("failed to sync remote plugins before install: {err}"),
+                )
+                .await;
+                return;
+            }
+            plugins_manager.install_plugin(request).await
         } else {
             plugins_manager.install_plugin(request).await
         };
@@ -6084,13 +6088,6 @@ impl CodexMessageProcessor {
                         )
                         .await;
                     }
-                    CorePluginInstallError::Remote(err) => {
-                        self.send_internal_error(
-                            request_id,
-                            format!("failed to enable remote plugin: {err}"),
-                        )
-                        .await;
-                    }
                     CorePluginInstallError::Join(err) => {
                         self.send_internal_error(
                             request_id,
@@ -6130,9 +6127,16 @@ impl CodexMessageProcessor {
                 }
             };
             let auth = self.auth_manager.auth().await;
-            plugins_manager
-                .uninstall_plugin_with_remote_sync(&config, auth.as_ref(), plugin_id)
-                .await
+            if let Err(err) = plugins_manager.sync_plugins_from_remote(&config, auth.as_ref()).await
+            {
+                self.send_internal_error(
+                    request_id,
+                    format!("failed to sync remote plugins before uninstall: {err}"),
+                )
+                .await;
+                return;
+            }
+            plugins_manager.uninstall_plugin(plugin_id).await
         } else {
             plugins_manager.uninstall_plugin(plugin_id).await
         };
@@ -6156,13 +6160,6 @@ impl CodexMessageProcessor {
                         self.send_internal_error(
                             request_id,
                             format!("failed to clear plugin config: {err}"),
-                        )
-                        .await;
-                    }
-                    CorePluginUninstallError::Remote(err) => {
-                        self.send_internal_error(
-                            request_id,
-                            format!("failed to uninstall remote plugin: {err}"),
                         )
                         .await;
                     }
