@@ -185,3 +185,37 @@ async fn new_uses_configured_openai_provider_for_model_refresh() {
     let _ = manager.list_models(RefreshStrategy::Online).await;
     assert_eq!(models_mock.requests().len(), 1);
 }
+
+#[tokio::test]
+async fn start_thread_initializes_team_runtime_when_workflow_exists() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config();
+    config.codex_home = temp_dir.path().join("codex-home");
+    config.cwd = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+    std::fs::create_dir_all(config.cwd.join(".codex")).expect("create workspace .codex dir");
+    std::fs::write(
+        config.cwd.join(".codex").join("team-workflow.yaml"),
+        "version: 1\n",
+    )
+    .expect("write workflow");
+
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.clone(),
+    );
+    let new_thread = manager
+        .start_thread(config.clone())
+        .await
+        .expect("start thread");
+
+    let team_dir = config
+        .cwd
+        .join(".codex")
+        .join("team-state")
+        .join(new_thread.thread_id.to_string());
+    assert!(team_dir.join("team.json").exists());
+    assert!(team_dir.join("AGENT_TEAM.md").exists());
+    assert!(config.cwd.join(".codex").join("AGENT.md").exists());
+}

@@ -10,6 +10,7 @@ use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::multi_agents::build_agent_spawn_config;
+use crate::tools::handlers::multi_agents::effective_agent_max_depth;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
@@ -528,7 +529,7 @@ async fn build_runner_options(
 ) -> Result<JobRunnerOptions, FunctionCallError> {
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
-    let max_depth = turn.config.agent_max_depth;
+    let max_depth = effective_agent_max_depth(turn.as_ref()).await?;
     if exceeds_thread_spawn_depth_limit(child_depth, max_depth) {
         return Err(FunctionCallError::RespondToModel(
             "agent depth limit reached; this session cannot spawn more subagents".to_string(),

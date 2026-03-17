@@ -7,6 +7,7 @@ use crate::codex::Codex;
 use crate::codex::CodexSpawnArgs;
 use crate::codex::CodexSpawnOk;
 use crate::codex::INITIAL_SUBMIT_ID;
+use crate::codex::SessionSettingsUpdate;
 use crate::codex_thread::CodexThread;
 use crate::config::Config;
 use crate::error::CodexErr;
@@ -24,6 +25,8 @@ use crate::rollout::RolloutRecorder;
 use crate::rollout::truncation;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::skills::SkillsManager;
+use crate::team::assigned_team_cwd;
+use crate::team::maybe_initialize_for_thread;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::ModelPreset;
@@ -759,6 +762,8 @@ impl ThreadManagerState {
         parent_trace: Option<W3cTraceContext>,
         user_shell_override: Option<crate::shell::Shell>,
     ) -> CodexResult<NewThread> {
+        let workspace_root = config.cwd.clone();
+        let team_session_source = session_source.clone();
         let watch_registration = self
             .file_watcher
             .register_config(&config, self.skills_manager.as_ref());
@@ -784,8 +789,14 @@ impl ThreadManagerState {
             parent_trace,
         })
         .await?;
-        self.finalize_thread_spawn(codex, thread_id, watch_registration)
-            .await
+        self.finalize_thread_spawn(
+            codex,
+            thread_id,
+            watch_registration,
+            workspace_root,
+            team_session_source,
+        )
+        .await
     }
 
     async fn finalize_thread_spawn(
@@ -793,6 +804,8 @@ impl ThreadManagerState {
         codex: Codex,
         thread_id: ThreadId,
         watch_registration: crate::file_watcher::WatchRegistration,
+        workspace_root: PathBuf,
+        session_source: SessionSource,
     ) -> CodexResult<NewThread> {
         let event = codex.next_event().await?;
         let session_configured = match event {
@@ -804,6 +817,30 @@ impl ThreadManagerState {
                 return Err(CodexErr::SessionConfiguredNotFirstEvent);
             }
         };
+
+        maybe_initialize_for_thread(
+            &workspace_root,
+            thread_id,
+            &session_source,
+            session_configured.rollout_path.as_deref(),
+        )
+        .await?;
+        if let Some(team_cwd) = assigned_team_cwd(&workspace_root, &thread_id.to_string()).await? {
+            if team_cwd != workspace_root {
+                codex
+                    .session
+                    .update_settings(SessionSettingsUpdate {
+                        cwd: Some(team_cwd),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|err| {
+                        CodexErr::Fatal(format!(
+                            "failed to switch thread {thread_id} to assigned team worktree: {err}"
+                        ))
+                    })?;
+            }
+        }
 
         let thread = Arc::new(CodexThread::new(
             codex,

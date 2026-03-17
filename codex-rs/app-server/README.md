@@ -31,6 +31,7 @@ When running with `--listen ws://IP:PORT`, the same listener also serves basic H
 - `GET /readyz` returns `200 OK` once the listener is accepting new connections.
 - `GET /healthz` returns `200 OK` when no `Origin` header is present.
 - Any request carrying an `Origin` header is rejected with `403 Forbidden`.
+- `GET /team-ops` serves a lightweight team-operations dashboard for root-scheduler sessions.
 
 Websocket transport is currently experimental and unsupported. Do not rely on it for production workloads.
 
@@ -122,6 +123,13 @@ Example with notification opt-out:
 ```
 
 ## API Overview
+
+Team workflow extensions:
+
+- `teamWorkflow/sessionRead` returns the public team-workflow session for a root scheduler thread, including topology, redacted tape entries, artifacts, governance document paths, worktree state, and environment cleanup status.
+- `teamWorkflow/sessionUpdated` notifies subscribed root-scheduler clients whenever persisted team-workflow state changes.
+
+Hidden child-team threads stay private on the public app-server surface. They are suppressed from thread-listing and thread-status APIs, and external clients should keep sending user instructions through the root scheduler thread with the normal `turn/start` flow.
 
 - `thread/start` — create a new thread; emits `thread/started` (including the current `thread.status`) and auto-subscribes you to turn/item events for that thread.
 - `thread/resume` — reopen an existing thread by id so subsequent `turn/start` calls append to it.
@@ -1351,6 +1359,8 @@ Field notes:
 - `resetsAt` is a Unix timestamp (seconds) for the next reset.
 
 ## Experimental API Opt-in
+
+The team workflow session APIs are part of this opt-in surface. Clients that need root-scheduler topology, redacted child-team status, or the `/team-ops` dashboard should set `capabilities.experimentalApi` to `true` during `initialize`.
 
 Some app-server methods and fields are intentionally gated behind an experimental capability with no backwards-compatible guarantees. This lets clients choose between:
 

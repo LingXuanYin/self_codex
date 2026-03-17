@@ -292,6 +292,11 @@ client_request_definitions! {
         params: v2::ThreadReadParams,
         response: v2::ThreadReadResponse,
     },
+    #[experimental("teamWorkflow/sessionRead")]
+    TeamWorkflowSessionRead => "teamWorkflow/sessionRead" {
+        params: v2::TeamWorkflowSessionReadParams,
+        response: v2::TeamWorkflowSessionReadResponse,
+    },
     SkillsList => "skills/list" {
         params: v2::SkillsListParams,
         response: v2::SkillsListResponse,
@@ -879,6 +884,10 @@ server_notification_definitions! {
     ThreadArchived => "thread/archived" (v2::ThreadArchivedNotification),
     ThreadUnarchived => "thread/unarchived" (v2::ThreadUnarchivedNotification),
     ThreadClosed => "thread/closed" (v2::ThreadClosedNotification),
+    #[experimental("teamWorkflow/sessionUpdated")]
+    TeamWorkflowSessionUpdated => "teamWorkflow/sessionUpdated" (
+        v2::TeamWorkflowSessionUpdatedNotification
+    ),
     SkillsChanged => "skills/changed" (v2::SkillsChangedNotification),
     ThreadNameUpdated => "thread/name/updated" (v2::ThreadNameUpdatedNotification),
     ThreadTokenUsageUpdated => "thread/tokenUsage/updated" (v2::ThreadTokenUsageUpdatedNotification),
@@ -1555,6 +1564,29 @@ mod tests {
     }
 
     #[test]
+    fn serialize_team_workflow_session_read() -> Result<()> {
+        let request = ClientRequest::TeamWorkflowSessionRead {
+            request_id: RequestId::Integer(10),
+            params: v2::TeamWorkflowSessionReadParams {
+                thread_id: "thr_root".to_string(),
+                recent_tape_limit: Some(12),
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "teamWorkflow/sessionRead",
+                "id": 10,
+                "params": {
+                    "threadId": "thr_root",
+                    "recentTapeLimit": 12
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn serialize_thread_status_changed_notification() -> Result<()> {
         let notification =
             ServerNotification::ThreadStatusChanged(v2::ThreadStatusChangedNotification {
@@ -1610,6 +1642,128 @@ mod tests {
     }
 
     #[test]
+    fn serialize_team_workflow_session_updated_notification() -> Result<()> {
+        let notification = ServerNotification::TeamWorkflowSessionUpdated(
+            v2::TeamWorkflowSessionUpdatedNotification {
+                session: v2::TeamWorkflowSession {
+                    root_thread_id: "thr_root".to_string(),
+                    root_team_id: "thr_root".to_string(),
+                    root_role: "root-scheduler".to_string(),
+                    current_phase: v2::TeamWorkflowPhase::Review,
+                    max_depth: 5,
+                    active_team_count: 2,
+                    blocked_team_count: 1,
+                    stale_resource_count: 1,
+                    global_governance_path: absolute_path(".codex/AGENT.md").into(),
+                    team_state_index_path: absolute_path(".codex/team-state/index.json").into(),
+                    teams: vec![v2::TeamWorkflowTeam {
+                        team_id: "thr_root".to_string(),
+                        thread_id: "thr_root".to_string(),
+                        parent_team_id: None,
+                        depth: 0,
+                        kind: v2::TeamWorkflowTeamKind::Root,
+                        role: "root-scheduler".to_string(),
+                        nickname: None,
+                        current_phase: v2::TeamWorkflowPhase::Review,
+                        blockers: vec!["review pending".to_string()],
+                        next_steps: vec!["integrate child handoff".to_string()],
+                        active_child_team_ids: vec!["thr_child".to_string()],
+                        governance_doc_path: absolute_path(
+                            ".codex/team-state/thr_root/AGENT_TEAM.md",
+                        )
+                        .into(),
+                        global_governance_path: absolute_path(".codex/AGENT.md").into(),
+                        produced_artifacts: vec![
+                            ".codex/team-state/thr_root/artifacts/handoff.md".to_string(),
+                        ],
+                        worktree: None,
+                        environment: v2::TeamWorkflowEnvironment {
+                            managed_resources: vec![],
+                            stale_resources: vec![],
+                            cleanup_notes: vec![],
+                            last_cleanup_at: None,
+                        },
+                        integration: None,
+                        recent_tape: vec![v2::TeamWorkflowTapeEntry {
+                            entry_id: "entry-1".to_string(),
+                            team_id: "thr_root".to_string(),
+                            kind: v2::TeamWorkflowTapeKind::ArtifactHandoff,
+                            summary: "Artifact handoff recorded.".to_string(),
+                            counterpart_team_id: Some("thr_child".to_string()),
+                            phase: Some(v2::TeamWorkflowPhase::Review),
+                            anchor: Some("delivery".to_string()),
+                            artifact_refs: vec![
+                                absolute_path(".codex/team-state/thr_root/status.json").into(),
+                            ],
+                            created_at: "2026-03-17T00:00:00Z".to_string(),
+                        }],
+                        updated_at: "2026-03-17T00:00:00Z".to_string(),
+                    }],
+                    updated_at: "2026-03-17T00:00:00Z".to_string(),
+                },
+            },
+        );
+        assert_eq!(
+            json!({
+                "method": "teamWorkflow/sessionUpdated",
+                "params": {
+                    "session": {
+                        "rootThreadId": "thr_root",
+                        "rootTeamId": "thr_root",
+                        "rootRole": "root-scheduler",
+                        "currentPhase": "review",
+                        "maxDepth": 5,
+                        "activeTeamCount": 2,
+                        "blockedTeamCount": 1,
+                        "staleResourceCount": 1,
+                        "globalGovernancePath": absolute_path_string(".codex/AGENT.md"),
+                        "teamStateIndexPath": absolute_path_string(".codex/team-state/index.json"),
+                        "teams": [{
+                            "teamId": "thr_root",
+                            "threadId": "thr_root",
+                            "parentTeamId": null,
+                            "depth": 0,
+                            "kind": "root",
+                            "role": "root-scheduler",
+                            "nickname": null,
+                            "currentPhase": "review",
+                            "blockers": ["review pending"],
+                            "nextSteps": ["integrate child handoff"],
+                            "activeChildTeamIds": ["thr_child"],
+                            "governanceDocPath": absolute_path_string(".codex/team-state/thr_root/AGENT_TEAM.md"),
+                            "globalGovernancePath": absolute_path_string(".codex/AGENT.md"),
+                            "producedArtifacts": [".codex/team-state/thr_root/artifacts/handoff.md"],
+                            "worktree": null,
+                            "environment": {
+                                "managedResources": [],
+                                "staleResources": [],
+                                "cleanupNotes": [],
+                                "lastCleanupAt": null
+                            },
+                            "integration": null,
+                            "recentTape": [{
+                                "entryId": "entry-1",
+                                "teamId": "thr_root",
+                                "kind": "artifact_handoff",
+                                "summary": "Artifact handoff recorded.",
+                                "counterpartTeamId": "thr_child",
+                                "phase": "review",
+                                "anchor": "delivery",
+                                "artifactRefs": [absolute_path_string(".codex/team-state/thr_root/status.json")],
+                                "createdAt": "2026-03-17T00:00:00Z"
+                            }],
+                            "updatedAt": "2026-03-17T00:00:00Z"
+                        }],
+                        "updatedAt": "2026-03-17T00:00:00Z"
+                    }
+                }
+            }),
+            serde_json::to_value(&notification)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn mock_experimental_method_is_marked_experimental() {
         let request = ClientRequest::MockExperimentalMethod {
             request_id: RequestId::Integer(1),
@@ -1617,6 +1771,19 @@ mod tests {
         };
         let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
         assert_eq!(reason, Some("mock/experimentalMethod"));
+    }
+
+    #[test]
+    fn team_workflow_session_read_is_marked_experimental() {
+        let request = ClientRequest::TeamWorkflowSessionRead {
+            request_id: RequestId::Integer(1),
+            params: v2::TeamWorkflowSessionReadParams {
+                thread_id: "thr_root".to_string(),
+                recent_tape_limit: None,
+            },
+        };
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
+        assert_eq!(reason, Some("teamWorkflow/sessionRead"));
     }
     #[test]
     fn thread_realtime_start_is_marked_experimental() {
@@ -1641,6 +1808,30 @@ mod tests {
             });
         let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&notification);
         assert_eq!(reason, Some("thread/realtime/started"));
+    }
+
+    #[test]
+    fn team_workflow_session_updated_notification_is_marked_experimental() {
+        let notification = ServerNotification::TeamWorkflowSessionUpdated(
+            v2::TeamWorkflowSessionUpdatedNotification {
+                session: v2::TeamWorkflowSession {
+                    root_thread_id: "thr_root".to_string(),
+                    root_team_id: "thr_root".to_string(),
+                    root_role: "root-scheduler".to_string(),
+                    current_phase: v2::TeamWorkflowPhase::Design,
+                    max_depth: 5,
+                    active_team_count: 1,
+                    blocked_team_count: 0,
+                    stale_resource_count: 0,
+                    global_governance_path: absolute_path(".codex/AGENT.md").into(),
+                    team_state_index_path: absolute_path(".codex/team-state/index.json").into(),
+                    teams: vec![],
+                    updated_at: "2026-03-17T00:00:00Z".to_string(),
+                },
+            },
+        );
+        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&notification);
+        assert_eq!(reason, Some("teamWorkflow/sessionUpdated"));
     }
 
     #[test]

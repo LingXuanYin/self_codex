@@ -5,6 +5,8 @@ use crate::agent::role::apply_role_to_config;
 
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
+use crate::team::prepare_child_team_spawn;
+use crate::team::record_child_team_spawn;
 
 pub(crate) struct Handler;
 
@@ -36,10 +38,15 @@ impl ToolHandler for Handler {
             .map(str::trim)
             .filter(|role| !role.is_empty());
         let input_items = parse_collab_input(args.message, args.items)?;
-        let prompt = input_preview(&input_items);
+        let prepared = prepare_child_team_spawn(&turn.cwd, session.conversation_id, input_items)
+            .await
+            .map_err(|err| {
+                FunctionCallError::RespondToModel(format!("team workflow error: {err}"))
+            })?;
+        let prompt = prepared.summary.clone();
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
-        let max_depth = turn.config.agent_max_depth;
+        let max_depth = effective_agent_max_depth(turn.as_ref()).await?;
         if exceeds_thread_spawn_depth_limit(child_depth, max_depth) {
             return Err(FunctionCallError::RespondToModel(
                 "Agent depth limit reached. Solve the task yourself.".to_string(),
@@ -72,14 +79,14 @@ impl ToolHandler for Handler {
             .await
             .map_err(FunctionCallError::RespondToModel)?;
         apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
-        apply_spawn_agent_overrides(&mut config, child_depth);
+        apply_spawn_agent_overrides(&mut config, child_depth, max_depth);
 
         let result = session
             .services
             .agent_control
             .spawn_agent_with_metadata(
                 config,
-                input_items,
+                prepared.items.clone(),
                 Some(thread_spawn_source(
                     session.conversation_id,
                     &turn.session_source,
@@ -153,6 +160,15 @@ impl ToolHandler for Handler {
             )
             .await;
         let new_thread_id = result?.thread_id;
+        record_child_team_spawn(
+            &turn.cwd,
+            session.conversation_id,
+            new_thread_id,
+            role_name,
+            &prepared,
+        )
+        .await
+        .map_err(|err| FunctionCallError::RespondToModel(format!("team workflow error: {err}")))?;
         let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
         turn.session_telemetry.counter(
             "codex.multi_agent.spawn",

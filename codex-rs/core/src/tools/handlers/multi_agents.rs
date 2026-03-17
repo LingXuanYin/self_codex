@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::error::CodexErr;
 use crate::function_tool::FunctionCallError;
 use crate::models_manager::manager::RefreshStrategy;
+use crate::team::resolve_team_max_depth;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -267,12 +268,25 @@ pub(crate) fn build_agent_spawn_config(
 fn build_agent_resume_config(
     turn: &TurnContext,
     child_depth: i32,
+    max_depth: i32,
 ) -> Result<Config, FunctionCallError> {
     let mut config = build_agent_shared_config(turn)?;
-    apply_spawn_agent_overrides(&mut config, child_depth);
+    apply_spawn_agent_overrides(&mut config, child_depth, max_depth);
     // For resume, keep base instructions sourced from rollout/session metadata.
     config.base_instructions = None;
     Ok(config)
+}
+
+pub(crate) async fn effective_agent_max_depth(
+    turn: &TurnContext,
+) -> Result<i32, FunctionCallError> {
+    resolve_team_max_depth(&turn.cwd, turn.config.agent_max_depth)
+        .await
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "failed to load .codex/team-workflow.yaml: {err}"
+            ))
+        })
 }
 
 fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, FunctionCallError> {
@@ -319,8 +333,9 @@ fn apply_spawn_agent_runtime_overrides(
     Ok(())
 }
 
-fn apply_spawn_agent_overrides(config: &mut Config, child_depth: i32) {
-    if child_depth >= config.agent_max_depth {
+fn apply_spawn_agent_overrides(config: &mut Config, child_depth: i32, max_depth: i32) {
+    config.agent_max_depth = max_depth;
+    if child_depth >= max_depth {
         let _ = config.features.disable(Feature::SpawnCsv);
         let _ = config.features.disable(Feature::Collab);
     }

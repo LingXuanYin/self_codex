@@ -1,4 +1,6 @@
 use super::*;
+use crate::team::prepare_team_message;
+use crate::team::record_team_message_delivery;
 
 pub(crate) struct Handler;
 
@@ -26,7 +28,15 @@ impl ToolHandler for Handler {
         let args: SendInputArgs = parse_arguments(&arguments)?;
         let receiver_thread_id = resolve_agent_target(&session, &turn, &args.target).await?;
         let input_items = parse_collab_input(args.message, args.items)?;
-        let prompt = input_preview(&input_items);
+        let prepared = prepare_team_message(
+            &turn.cwd,
+            session.conversation_id,
+            receiver_thread_id,
+            input_items,
+        )
+        .await
+        .map_err(|err| FunctionCallError::RespondToModel(format!("team workflow error: {err}")))?;
+        let prompt = prepared.summary.clone();
         let receiver_agent = session
             .services
             .agent_control
@@ -55,7 +65,7 @@ impl ToolHandler for Handler {
         let result = session
             .services
             .agent_control
-            .send_input(receiver_thread_id, input_items)
+            .send_input(receiver_thread_id, prepared.items.clone())
             .await
             .map_err(|err| collab_agent_error(receiver_thread_id, err));
         let status = session
@@ -79,6 +89,14 @@ impl ToolHandler for Handler {
             )
             .await;
         let submission_id = result?;
+        record_team_message_delivery(
+            &turn.cwd,
+            session.conversation_id,
+            receiver_thread_id,
+            &prepared,
+        )
+        .await
+        .map_err(|err| FunctionCallError::RespondToModel(format!("team workflow error: {err}")))?;
 
         Ok(SendInputResult { submission_id })
     }

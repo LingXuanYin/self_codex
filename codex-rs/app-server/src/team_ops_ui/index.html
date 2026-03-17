@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Codex Team Ops</title>
+    <link rel="stylesheet" href="/team-ops/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Team Workflow Operations</p>
+          <h1>Codex Team Ops Console</h1>
+          <p class="lede">
+            Monitor the root scheduler, inspect team artifacts, and steer work
+            without exposing child-team context.
+          </p>
+        </div>
+        <div class="hero-note">
+          <span class="note-label">Protocol Surface</span>
+          <strong>Root scheduler only</strong>
+          <p>
+            Nested teams publish redacted status, artifacts, and governance
+            state. Raw child context stays private.
+          </p>
+        </div>
+      </header>
+
+      <section class="control-bar">
+        <div class="control-group">
+          <label for="ws-url">WebSocket</label>
+          <input id="ws-url" type="text" spellcheck="false" />
+        </div>
+        <div class="control-group">
+          <label for="thread-id">Root Thread ID</label>
+          <input
+            id="thread-id"
+            type="text"
+            placeholder="00000000-0000-0000-0000-000000000000"
+            spellcheck="false"
+          />
+        </div>
+        <div class="control-actions">
+          <button id="connect-button" type="button">Connect</button>
+          <button id="attach-button" type="button">Attach Session</button>
+          <button id="refresh-button" type="button">Refresh</button>
+        </div>
+        <div class="status-strip">
+          <span id="connection-pill" class="pill pill-neutral">Disconnected</span>
+          <span id="status-text">Waiting for connection.</span>
+        </div>
+      </section>
+
+      <main class="layout">
+        <section class="panel panel-metrics">
+          <div class="panel-header">
+            <h2>Session Overview</h2>
+            <p>Top-level topology, phase, blockers, and cleanup pressure.</p>
+          </div>
+          <div id="overview-grid" class="metric-grid"></div>
+        </section>
+
+        <section class="panel panel-topology">
+          <div class="panel-header">
+            <h2>Team Topology</h2>
+            <p>
+              Select a team to inspect artifacts, governance documents, the
+              reading path, and cleanup state.
+            </p>
+          </div>
+          <div id="team-grid" class="team-grid"></div>
+        </section>
+
+        <section class="panel panel-details">
+          <div class="panel-header">
+            <h2>Selected Team</h2>
+            <p id="selected-team-summary">
+              Attach a session to inspect team details.
+            </p>
+          </div>
+          <div class="detail-columns">
+            <div class="detail-stack">
+              <div class="subpanel">
+                <div class="subpanel-header">
+                  <h3>Governance</h3>
+                  <span class="subpanel-note">AGENT.md and AGENT_TEAM.md</span>
+                </div>
+                <div id="governance-actions" class="action-list"></div>
+              </div>
+              <div class="subpanel">
+                <div class="subpanel-header">
+                  <h3>Artifacts</h3>
+                  <span class="subpanel-note">OpenSpec-aligned handoffs only</span>
+                </div>
+                <div id="artifact-actions" class="action-list"></div>
+              </div>
+              <div class="subpanel">
+                <div class="subpanel-header">
+                  <h3>Cleanup and Blockers</h3>
+                  <span class="subpanel-note">
+                    Visibility for stale resources and workflow investigation
+                  </span>
+                </div>
+                <div id="resource-summary"></div>
+              </div>
+            </div>
+            <div class="detail-stack">
+              <div class="subpanel">
+                <div class="subpanel-header">
+                  <h3>Reading Path</h3>
+                  <span class="subpanel-note">
+                    Redacted delivery tape inspired by reading-path navigation
+                  </span>
+                </div>
+                <div id="reading-path" class="timeline"></div>
+              </div>
+              <div class="subpanel">
+                <div class="subpanel-header">
+                  <h3>Document Viewer</h3>
+                  <span class="subpanel-note">Read governance and handoff files</span>
+                </div>
+                <pre id="document-viewer" class="document-viewer">
+Select a governance document or artifact.</pre
+                >
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel-workspace">
+          <div class="panel-header">
+            <h2>Root Scheduler Workspace</h2>
+            <p>
+              Send instructions only to the root scheduler. Child teams stay
+              private behind the redacted session view.
+            </p>
+          </div>
+          <div class="workspace-shell">
+            <textarea
+              id="instruction-input"
+              rows="5"
+              placeholder="Ask the root scheduler to continue, replan, review blockers, or clean stale environments."
+            ></textarea>
+            <div class="workspace-actions">
+              <button id="send-button" type="button">Send Instruction</button>
+            </div>
+          </div>
+          <div id="thread-view" class="thread-view"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/team-ops/app.js" defer></script>
+  </body>
+</html>

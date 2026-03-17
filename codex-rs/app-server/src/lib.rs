@@ -72,6 +72,7 @@ mod message_processor;
 mod models;
 mod outgoing_message;
 mod server_request_error;
+mod team_ops_ui;
 mod thread_state;
 mod thread_status;
 mod transport;

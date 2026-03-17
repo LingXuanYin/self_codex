@@ -3065,6 +3065,193 @@ pub struct ThreadReadResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum TeamWorkflowTeamKind {
+    Root,
+    Child,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum TeamWorkflowPhase {
+    Bootstrap,
+    Design,
+    Development,
+    Review,
+    Replan,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum TeamWorkflowResourceKind {
+    Worktree,
+    TestEnvironment,
+    Other,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum TeamWorkflowResourceStatus {
+    Active,
+    Stale,
+    Cleaned,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum TeamWorkflowTapeKind {
+    Bootstrap,
+    WorktreeAssigned,
+    Delegation,
+    PeerSync,
+    ArtifactHandoff,
+    Resume,
+    IntegrationReady,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum TeamWorkflowIntegrationMode {
+    Merge,
+    CherryPick,
+    Patch,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowResource {
+    pub resource_id: String,
+    pub kind: TeamWorkflowResourceKind,
+    pub path: Option<PathBuf>,
+    pub status: TeamWorkflowResourceStatus,
+    pub cleanup_required: bool,
+    pub last_verified_at: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowEnvironment {
+    pub managed_resources: Vec<TeamWorkflowResource>,
+    pub stale_resources: Vec<TeamWorkflowResource>,
+    pub cleanup_notes: Vec<String>,
+    pub last_cleanup_at: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowWorktree {
+    pub branch_name: String,
+    pub current_branch: Option<String>,
+    pub checkout_path: PathBuf,
+    pub source_checkout_path: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub base_commit: Option<String>,
+    pub head_commit: Option<String>,
+    pub managed: bool,
+    pub updated_at: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowIntegration {
+    pub source_team_id: String,
+    pub target_team_id: Option<String>,
+    pub source_branch: Option<String>,
+    pub source_checkout_path: PathBuf,
+    pub target_checkout_path: Option<PathBuf>,
+    pub base_commit: Option<String>,
+    pub head_commit: Option<String>,
+    pub patch_path: Option<PathBuf>,
+    pub accepted_modes: Vec<TeamWorkflowIntegrationMode>,
+    pub review_ready: bool,
+    pub updated_at: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowTapeEntry {
+    pub entry_id: String,
+    pub team_id: String,
+    pub kind: TeamWorkflowTapeKind,
+    pub summary: String,
+    pub counterpart_team_id: Option<String>,
+    pub phase: Option<TeamWorkflowPhase>,
+    pub anchor: Option<String>,
+    pub artifact_refs: Vec<PathBuf>,
+    pub created_at: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowTeam {
+    pub team_id: String,
+    pub thread_id: String,
+    pub parent_team_id: Option<String>,
+    pub depth: i32,
+    pub kind: TeamWorkflowTeamKind,
+    pub role: String,
+    pub nickname: Option<String>,
+    pub current_phase: TeamWorkflowPhase,
+    pub blockers: Vec<String>,
+    pub next_steps: Vec<String>,
+    pub active_child_team_ids: Vec<String>,
+    pub governance_doc_path: PathBuf,
+    pub global_governance_path: PathBuf,
+    pub produced_artifacts: Vec<String>,
+    pub worktree: Option<TeamWorkflowWorktree>,
+    pub environment: TeamWorkflowEnvironment,
+    pub integration: Option<TeamWorkflowIntegration>,
+    pub recent_tape: Vec<TeamWorkflowTapeEntry>,
+    pub updated_at: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowSession {
+    pub root_thread_id: String,
+    pub root_team_id: String,
+    pub root_role: String,
+    pub current_phase: TeamWorkflowPhase,
+    pub max_depth: i32,
+    pub active_team_count: usize,
+    pub blocked_team_count: usize,
+    pub stale_resource_count: usize,
+    pub global_governance_path: PathBuf,
+    pub team_state_index_path: PathBuf,
+    pub teams: Vec<TeamWorkflowTeam>,
+    pub updated_at: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowSessionReadParams {
+    pub thread_id: String,
+    #[ts(optional = nullable)]
+    pub recent_tape_limit: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowSessionReadResponse {
+    pub session: TeamWorkflowSession,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct SkillsListParams {
@@ -4696,6 +4883,13 @@ pub struct ThreadUnarchivedNotification {
 #[ts(export_to = "v2/")]
 pub struct ThreadClosedNotification {
     pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowSessionUpdatedNotification {
+    pub session: TeamWorkflowSession,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
