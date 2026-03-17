@@ -60,9 +60,31 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.93.0
 
+      - name: Install sccache
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
+        with:
+          tool: sccache
+          version: 0.7.5
+
+      - name: Configure sccache backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=${{ github.workspace }}/.sccache" >> "$GITHUB_ENV"
+          fi
+
+      - name: Enable sccache wrapper
+        shell: bash
+        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: codex-rs -> target
+          shared-key: fork-build-release-linux-x64
 
       - name: Run targeted release validation tests
         shell: bash
@@ -76,6 +98,11 @@ jobs:
       - name: Validate team ops UI syntax
         shell: bash
         run: node --check app-server/src/team_ops_ui/app.js
+
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: sccache --show-stats || true
 
   build-linux-x64:
     name: build-linux-x64
@@ -102,9 +129,31 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
 
+      - name: Install sccache
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
+        with:
+          tool: sccache
+          version: 0.7.5
+
+      - name: Configure sccache backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=${{ github.workspace }}/.sccache" >> "$GITHUB_ENV"
+          fi
+
+      - name: Enable sccache wrapper
+        shell: bash
+        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: codex-rs -> target
+          shared-key: fork-build-release-linux-x64
 
       - name: Build Linux release binaries
         shell: bash
@@ -131,6 +180,11 @@ jobs:
           name: codex-linux-x64
           path: codex-rs/dist/codex-linux-x64.tar.gz
 
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: sccache --show-stats || true
+
   build-windows-x64:
     name: build-windows-x64
     needs:
@@ -149,9 +203,31 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Install sccache
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
+        with:
+          tool: sccache
+          version: 0.7.5
+
+      - name: Configure sccache backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=${{ github.workspace }}/.sccache" >> "$GITHUB_ENV"
+          fi
+
+      - name: Enable sccache wrapper
+        shell: bash
+        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: codex-rs -> target
+          shared-key: fork-build-release-windows-x64
 
       - name: Build Windows release binaries
         shell: bash
@@ -186,6 +262,11 @@ jobs:
         with:
           name: codex-windows-x64
           path: codex-rs/dist/codex-windows-x64.zip
+
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: sccache --show-stats || true
 
   publish-release:
     name: publish-release
