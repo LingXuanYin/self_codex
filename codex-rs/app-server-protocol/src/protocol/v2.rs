@@ -3863,14 +3863,13 @@ impl From<CoreRealtimeAudioFrame> for ThreadRealtimeAudioChunk {
             sample_rate,
             num_channels,
             samples_per_channel,
-            item_id,
         } = value;
         Self {
             data,
             sample_rate,
             num_channels,
             samples_per_channel,
-            item_id,
+            item_id: None,
         }
     }
 }
@@ -3882,14 +3881,13 @@ impl From<ThreadRealtimeAudioChunk> for CoreRealtimeAudioFrame {
             sample_rate,
             num_channels,
             samples_per_channel,
-            item_id,
+            item_id: _,
         } = value;
         Self {
             data,
             sample_rate,
             num_channels,
             samples_per_channel,
-            item_id,
         }
     }
 }
