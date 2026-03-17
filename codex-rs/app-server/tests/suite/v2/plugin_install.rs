@@ -86,6 +86,7 @@ async fn plugin_install_returns_invalid_request_for_missing_marketplace_file() -
                 codex_home.path().join("missing-marketplace.json"),
             )?,
             plugin_name: "missing-plugin".to_string(),
+            force_remote_sync: false,
         })
         .await?;
 
@@ -124,6 +125,7 @@ async fn plugin_install_returns_invalid_request_for_not_available_plugin() -> Re
         .send_plugin_install_request(PluginInstallParams {
             marketplace_path,
             plugin_name: "sample-plugin".to_string(),
+            force_remote_sync: false,
         })
         .await?;
 
@@ -172,6 +174,7 @@ async fn plugin_install_tracks_analytics_event() -> Result<()> {
         .send_plugin_install_request(PluginInstallParams {
             marketplace_path,
             plugin_name: "sample-plugin".to_string(),
+            force_remote_sync: false,
         })
         .await?;
     let response: JSONRPCResponse = timeout(
@@ -285,6 +288,7 @@ async fn plugin_install_returns_apps_needing_auth() -> Result<()> {
         .send_plugin_install_request(PluginInstallParams {
             marketplace_path,
             plugin_name: "sample-plugin".to_string(),
+            force_remote_sync: false,
         })
         .await?;
 
@@ -367,6 +371,7 @@ async fn plugin_install_filters_disallowed_apps_needing_auth() -> Result<()> {
         .send_plugin_install_request(PluginInstallParams {
             marketplace_path,
             plugin_name: "sample-plugin".to_string(),
+            force_remote_sync: false,
         })
         .await?;
 

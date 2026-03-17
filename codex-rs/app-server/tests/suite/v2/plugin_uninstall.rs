@@ -38,6 +38,7 @@ enabled = true
 
     let params = PluginUninstallParams {
         plugin_id: "sample-plugin@debug".to_string(),
+        force_remote_sync: false,
     };
 
     let request_id = mcp.send_plugin_uninstall_request(params.clone()).await?;
@@ -97,6 +98,7 @@ async fn plugin_uninstall_tracks_analytics_event() -> Result<()> {
     let request_id = mcp
         .send_plugin_uninstall_request(PluginUninstallParams {
             plugin_id: "sample-plugin@debug".to_string(),
+            force_remote_sync: false,
         })
         .await?;
     let response: JSONRPCResponse = timeout(
