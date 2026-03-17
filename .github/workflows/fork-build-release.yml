@@ -75,6 +75,8 @@ jobs:
 
   build-linux-x64:
     name: build-linux-x64
+    needs:
+      - validate-linux-x64
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -123,6 +125,8 @@ jobs:
 
   build-windows-x64:
     name: build-windows-x64
+    needs:
+      - validate-linux-x64
     runs-on: windows-latest
     defaults:
       run:

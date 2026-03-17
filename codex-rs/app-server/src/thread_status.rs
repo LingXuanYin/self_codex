@@ -9,6 +9,7 @@ use codex_app_server_protocol::ThreadActiveFlag;
 use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ThreadStatusChangedNotification;
 use std::collections::HashMap;
+use std::collections::HashSet;
 #[cfg(test)]
 use std::path::PathBuf;
 use std::sync::Arc;
