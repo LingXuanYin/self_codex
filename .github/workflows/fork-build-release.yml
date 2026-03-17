@@ -60,6 +60,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.93.0
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs -> target
+
       - name: Run targeted release validation tests
         shell: bash
         run: |
@@ -97,6 +101,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
           targets: x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs -> target
 
       - name: Build Linux release binaries
         shell: bash
@@ -140,6 +148,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
           targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs -> target
 
       - name: Build Windows release binaries
         shell: bash
@@ -205,6 +217,7 @@ jobs:
           INPUT_DRAFT: ${{ inputs.draft }}
           TARGET_REF: ${{ inputs.ref != '' && inputs.ref || github.ref_name }}
           TARGET_COMMITISH: ${{ inputs.ref != '' && inputs.ref || github.sha }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
@@ -233,12 +246,13 @@ jobs:
             exit 1
           fi
 
-          if gh release view "${tag}" >/dev/null 2>&1; then
-            gh release upload "${tag}" "${files[@]}" --clobber
-            gh release edit "${tag}" --title "${name}"
+          if gh release view "${tag}" --repo "${GH_REPO}" >/dev/null 2>&1; then
+            gh release upload "${tag}" "${files[@]}" --repo "${GH_REPO}" --clobber
+            gh release edit "${tag}" --repo "${GH_REPO}" --title "${name}"
           else
             args=(
               gh release create "${tag}"
+              --repo "${GH_REPO}"
               --target "${TARGET_COMMITISH}"
               --title "${name}"
               --notes "${notes}"
