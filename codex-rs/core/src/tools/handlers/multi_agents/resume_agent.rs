@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent::next_thread_spawn_depth;
+use crate::team::record_team_resume;
 
 pub(crate) struct Handler;
 
@@ -33,7 +34,7 @@ impl ToolHandler for Handler {
             .await
             .unwrap_or((None, None));
         let child_depth = next_thread_spawn_depth(&turn.session_source);
-        let max_depth = turn.config.agent_max_depth;
+        let max_depth = effective_agent_max_depth(turn.as_ref()).await?;
         if exceeds_thread_spawn_depth_limit(child_depth, max_depth) {
             return Err(FunctionCallError::RespondToModel(
                 "Agent depth limit reached. Solve the task yourself.".to_string(),
@@ -59,11 +60,19 @@ impl ToolHandler for Handler {
             .agent_control
             .get_status(receiver_thread_id)
             .await;
-        let error = if matches!(status, AgentStatus::NotFound) {
-            match try_resume_closed_agent(&session, &turn, receiver_thread_id, child_depth).await {
+        let resumed = if matches!(status, AgentStatus::NotFound) {
+            match try_resume_closed_agent(
+                &session,
+                &turn,
+                receiver_thread_id,
+                child_depth,
+                max_depth,
+            )
+            .await
+            {
                 Ok(resumed_status) => {
                     status = resumed_status;
-                    None
+                    true
                 }
                 Err(err) => {
                     status = session
@@ -71,11 +80,11 @@ impl ToolHandler for Handler {
                         .agent_control
                         .get_status(receiver_thread_id)
                         .await;
-                    Some(err)
+                    return Err(err);
                 }
             }
         } else {
-            None
+            false
         };
 
         let (receiver_agent_nickname, receiver_agent_role) = session
@@ -99,11 +108,15 @@ impl ToolHandler for Handler {
             )
             .await;
 
-        if let Some(err) = error {
-            return Err(err);
+        if resumed {
+            record_team_resume(&turn.cwd, &receiver_thread_id.to_string())
+                .await
+                .map_err(|err| {
+                    FunctionCallError::RespondToModel(format!("team workflow error: {err}"))
+                })?;
         }
         turn.session_telemetry
-            .counter("codex.multi_agent.resume", 1, &[]);
+            .counter("codex.multi_agent.resume", /*inc*/ 1, &[]);
 
         Ok(ResumeAgentResult { status })
     }
@@ -142,15 +155,20 @@ async fn try_resume_closed_agent(
     turn: &Arc<TurnContext>,
     receiver_thread_id: ThreadId,
     child_depth: i32,
+    max_depth: i32,
 ) -> Result<AgentStatus, FunctionCallError> {
-    let config = build_agent_resume_config(turn.as_ref(), child_depth)?;
+    let config = build_agent_resume_config(turn.as_ref(), child_depth, max_depth)?;
     let resumed_thread_id = session
         .services
         .agent_control
         .resume_agent_from_rollout(
             config,
             receiver_thread_id,
-            thread_spawn_source(session.conversation_id, child_depth, None),
+            thread_spawn_source(
+                session.conversation_id,
+                child_depth,
+                /*agent_role*/ None,
+            ),
         )
         .await
         .map_err(|err| collab_agent_error(receiver_thread_id, err))?;

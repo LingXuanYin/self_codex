@@ -17,6 +17,7 @@ You can also install via Homebrew (`brew install --cask codex`) or download a pl
 
 - First run with Codex? Start with [`docs/getting-started.md`](../docs/getting-started.md) (links to the walkthrough for prompts, keyboard shortcuts, and session management).
 - Want deeper control? See [`docs/config.md`](../docs/config.md) and [`docs/install.md`](../docs/install.md).
+- Working with hierarchical team workflows? See [`docs/team_workflows.md`](../docs/team_workflows.md).
 
 ## What's new in the Rust CLI
 

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod experimental_api;
 mod export;
 mod jsonrpc_lite;

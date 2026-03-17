@@ -91,19 +91,32 @@ impl ThreadWatchManager {
     }
 
     pub(crate) async fn upsert_thread(&self, thread: Thread) {
-        self.mutate_and_publish(move |state| state.upsert_thread(thread.id, true))
-            .await;
+        self.mutate_and_publish(move |state| {
+            state.upsert_thread(thread.id, /*emit_notification*/ true)
+        })
+        .await;
     }
 
     pub(crate) async fn upsert_thread_silently(&self, thread: Thread) {
-        self.mutate_and_publish(move |state| state.upsert_thread(thread.id, false))
-            .await;
+        self.mutate_and_publish(move |state| {
+            state.upsert_thread(thread.id, /*emit_notification*/ false)
+        })
+        .await;
     }
 
     pub(crate) async fn remove_thread(&self, thread_id: &str) {
         let thread_id = thread_id.to_string();
         self.mutate_and_publish(move |state| state.remove_thread(&thread_id))
             .await;
+    }
+
+    pub(crate) async fn hide_thread(&self, thread_id: &str) {
+        let thread_id = thread_id.to_string();
+        self.mutate_and_publish(move |state| {
+            state.hide_thread(&thread_id);
+            None
+        })
+        .await;
     }
 
     pub(crate) async fn loaded_status_for_thread(&self, thread_id: &str) -> ThreadStatus {
@@ -291,6 +304,7 @@ pub(crate) fn resolve_thread_status(
 #[derive(Default)]
 struct ThreadWatchState {
     runtime_by_thread_id: HashMap<String, RuntimeFacts>,
+    hidden_thread_ids: HashSet<String>,
 }
 
 impl ThreadWatchState {
@@ -315,6 +329,7 @@ impl ThreadWatchState {
     fn remove_thread(&mut self, thread_id: &str) -> Option<ThreadStatusChangedNotification> {
         let previous_status = self.status_for(thread_id);
         self.runtime_by_thread_id.remove(thread_id);
+        self.hidden_thread_ids.remove(thread_id);
         if previous_status.is_some() && previous_status != Some(ThreadStatus::NotLoaded) {
             Some(ThreadStatusChangedNotification {
                 thread_id: thread_id.to_string(),
@@ -344,6 +359,9 @@ impl ThreadWatchState {
     }
 
     fn status_for(&self, thread_id: &str) -> Option<ThreadStatus> {
+        if self.hidden_thread_ids.contains(thread_id) {
+            return Some(ThreadStatus::NotLoaded);
+        }
         self.runtime_by_thread_id
             .get(thread_id)
             .map(loaded_thread_status)
@@ -359,6 +377,9 @@ impl ThreadWatchState {
         thread_id: String,
         previous_status: Option<ThreadStatus>,
     ) -> Option<ThreadStatusChangedNotification> {
+        if self.hidden_thread_ids.contains(&thread_id) {
+            return None;
+        }
         let status = self.status_for(&thread_id)?;
 
         if previous_status.as_ref() == Some(&status) {
@@ -366,6 +387,10 @@ impl ThreadWatchState {
         }
 
         Some(ThreadStatusChangedNotification { thread_id, status })
+    }
+
+    fn hide_thread(&mut self, thread_id: &str) {
+        self.hidden_thread_ids.insert(thread_id.to_string());
     }
 }
 
@@ -741,6 +766,38 @@ mod tests {
                     active_flags: vec![],
                 },
             },
+        );
+    }
+
+    #[tokio::test]
+    async fn hidden_thread_suppresses_status_notifications_and_public_status() {
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(8);
+        let manager = ThreadWatchManager::new_with_outgoing(Arc::new(OutgoingMessageSender::new(
+            outgoing_tx,
+        )));
+
+        manager
+            .upsert_thread(test_thread(
+                INTERACTIVE_THREAD_ID,
+                codex_app_server_protocol::SessionSource::Cli,
+            ))
+            .await;
+        let _ = recv_status_changed_notification(&mut outgoing_rx).await;
+
+        manager.hide_thread(INTERACTIVE_THREAD_ID).await;
+        manager.note_turn_started(INTERACTIVE_THREAD_ID).await;
+
+        assert_eq!(
+            manager
+                .loaded_status_for_thread(INTERACTIVE_THREAD_ID)
+                .await,
+            ThreadStatus::NotLoaded,
+        );
+        assert!(
+            timeout(Duration::from_millis(100), outgoing_rx.recv())
+                .await
+                .is_err(),
+            "hidden threads should not emit public status notifications"
         );
     }
 

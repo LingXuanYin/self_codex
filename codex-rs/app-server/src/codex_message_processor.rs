@@ -72,6 +72,7 @@ use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::LoginApiKeyParams;
 use codex_app_server_protocol::LogoutAccountResponse;
+use codex_app_server_protocol::MarketplaceInterface;
 use codex_app_server_protocol::McpServerOauthLoginCompletedNotification;
 use codex_app_server_protocol::McpServerOauthLoginParams;
 use codex_app_server_protocol::McpServerOauthLoginResponse;
@@ -112,6 +113,22 @@ use codex_app_server_protocol::SkillsRemoteReadParams;
 use codex_app_server_protocol::SkillsRemoteReadResponse;
 use codex_app_server_protocol::SkillsRemoteWriteParams;
 use codex_app_server_protocol::SkillsRemoteWriteResponse;
+use codex_app_server_protocol::TeamWorkflowEnvironment;
+use codex_app_server_protocol::TeamWorkflowIntegration;
+use codex_app_server_protocol::TeamWorkflowIntegrationMode;
+use codex_app_server_protocol::TeamWorkflowPhase;
+use codex_app_server_protocol::TeamWorkflowResource;
+use codex_app_server_protocol::TeamWorkflowResourceKind;
+use codex_app_server_protocol::TeamWorkflowResourceStatus;
+use codex_app_server_protocol::TeamWorkflowSession;
+use codex_app_server_protocol::TeamWorkflowSessionReadParams;
+use codex_app_server_protocol::TeamWorkflowSessionReadResponse;
+use codex_app_server_protocol::TeamWorkflowSessionUpdatedNotification;
+use codex_app_server_protocol::TeamWorkflowTapeEntry;
+use codex_app_server_protocol::TeamWorkflowTapeKind;
+use codex_app_server_protocol::TeamWorkflowTeam;
+use codex_app_server_protocol::TeamWorkflowTeamKind;
+use codex_app_server_protocol::TeamWorkflowWorktree;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadArchiveParams;
 use codex_app_server_protocol::ThreadArchiveResponse;
@@ -240,6 +257,22 @@ use codex_core::skills::remote::list_remote_skills;
 use codex_core::state_db::StateDbHandle;
 use codex_core::state_db::get_state_db;
 use codex_core::state_db::reconcile_rollout;
+use codex_core::team_api::TeamWorkflowPublicEnvironment as CoreTeamWorkflowEnvironment;
+use codex_core::team_api::TeamWorkflowPublicIntegration as CoreTeamWorkflowIntegration;
+use codex_core::team_api::TeamWorkflowPublicIntegrationMode as CoreTeamWorkflowIntegrationMode;
+use codex_core::team_api::TeamWorkflowPublicPhase as CoreTeamWorkflowPhase;
+use codex_core::team_api::TeamWorkflowPublicResource as CoreTeamWorkflowResource;
+use codex_core::team_api::TeamWorkflowPublicResourceKind as CoreTeamWorkflowResourceKind;
+use codex_core::team_api::TeamWorkflowPublicResourceStatus as CoreTeamWorkflowResourceStatus;
+use codex_core::team_api::TeamWorkflowPublicSession as CoreTeamWorkflowSession;
+use codex_core::team_api::TeamWorkflowPublicTapeEntry as CoreTeamWorkflowTapeEntry;
+use codex_core::team_api::TeamWorkflowPublicTapeKind as CoreTeamWorkflowTapeKind;
+use codex_core::team_api::TeamWorkflowPublicTeam as CoreTeamWorkflowTeam;
+use codex_core::team_api::TeamWorkflowPublicTeamKind as CoreTeamWorkflowTeamKind;
+use codex_core::team_api::TeamWorkflowPublicWorktree as CoreTeamWorkflowWorktree;
+use codex_core::team_api::TeamWorkflowThreadVisibility;
+use codex_core::team_api::load_public_team_workflow_session;
+use codex_core::team_api::team_workflow_thread_visibility;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_core::windows_sandbox::WindowsSandboxSetupMode as CoreWindowsSandboxSetupMode;
 use codex_core::windows_sandbox::WindowsSandboxSetupRequest;
@@ -325,6 +358,7 @@ use crate::thread_state::ThreadStateManager;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
+const TEAM_WORKFLOW_TAPE_LIMIT: usize = 16;
 
 struct ThreadListFilters {
     model_providers: Option<Vec<String>>,
@@ -446,7 +480,7 @@ impl CodexMessageProcessor {
     }
 
     pub(crate) async fn maybe_start_curated_repo_sync_for_latest_config(&self) {
-        match self.load_latest_config(None).await {
+        match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => self
                 .thread_manager
                 .plugins_manager()
@@ -473,6 +507,7 @@ impl CodexMessageProcessor {
             message: format!("invalid thread id: {err}"),
             data: None,
         })?;
+        self.ensure_public_thread_access(thread_id).await?;
 
         let thread = self
             .thread_manager
@@ -715,6 +750,10 @@ impl CodexMessageProcessor {
             }
             ClientRequest::ThreadRead { request_id, params } => {
                 self.thread_read(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::TeamWorkflowSessionRead { request_id, params } => {
+                self.team_workflow_session_read(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::SkillsList { request_id, params } => {
@@ -1623,7 +1662,10 @@ impl CodexMessageProcessor {
         }
 
         let cwd = cwd.unwrap_or_else(|| self.config.cwd.clone());
-        let mut env = create_env(&self.config.permissions.shell_environment_policy, None);
+        let mut env = create_env(
+            &self.config.permissions.shell_environment_policy,
+            /*thread_id*/ None,
+        );
         if let Some(env_overrides) = env_overrides {
             for (key, value) in env_overrides {
                 match value {
@@ -1659,8 +1701,8 @@ impl CodexMessageProcessor {
             Some(spec) => match spec
                 .start_proxy(
                     self.config.permissions.sandbox_policy.get(),
-                    None,
-                    None,
+                    /*policy_decider*/ None,
+                    /*blocked_request_observer*/ None,
                     managed_network_requirements_enabled,
                     NetworkProxyAuditMetadata::default(),
                 )
@@ -2092,7 +2134,7 @@ impl CodexMessageProcessor {
                             otel.name = "app_server.thread_start.resolve_status",
                         ))
                         .await,
-                    false,
+                    /*has_in_progress_turn*/ false,
                 );
 
                 let response = ThreadStartResponse {
@@ -2191,6 +2233,10 @@ impl CodexMessageProcessor {
                 return;
             }
         };
+        if let Err(error) = self.ensure_public_thread_access(thread_id).await {
+            self.outgoing.send_error(request_id, error).await;
+            return;
+        }
 
         let rollout_path =
             match find_thread_path_by_id_str(&self.config.codex_home, &thread_id.to_string()).await
@@ -2317,6 +2363,10 @@ impl CodexMessageProcessor {
                 return;
             }
         };
+        if let Err(error) = self.ensure_public_thread_access(thread_id).await {
+            self.outgoing.send_error(request_id, error).await;
+            return;
+        }
         let Some(name) = codex_core::util::normalize_thread_name(&name) else {
             self.send_invalid_request_error(
                 request_id,
@@ -2401,6 +2451,10 @@ impl CodexMessageProcessor {
                 return;
             }
         };
+        if let Err(error) = self.ensure_public_thread_access(thread_uuid).await {
+            self.outgoing.send_error(request_id, error).await;
+            return;
+        }
 
         let Some(ThreadMetadataGitInfoUpdateParams {
             sha,
@@ -2541,7 +2595,7 @@ impl CodexMessageProcessor {
             self.thread_watch_manager
                 .loaded_status_for_thread(&thread.id)
                 .await,
-            false,
+            /*has_in_progress_turn*/ false,
         );
 
         self.outgoing
@@ -2592,10 +2646,10 @@ impl CodexMessageProcessor {
                 Some(state_db_ctx),
                 rollout_path.as_path(),
                 self.config.model_provider_id.as_str(),
-                None,
+                /*builder*/ None,
                 &[],
-                None,
-                None,
+                /*archived_only*/ None,
+                /*new_thread_memory_mode*/ None,
             )
             .await;
 
@@ -2663,10 +2717,10 @@ impl CodexMessageProcessor {
             Some(state_db_ctx),
             rollout_path.as_path(),
             self.config.model_provider_id.as_str(),
-            None,
+            /*builder*/ None,
             &[],
-            None,
-            None,
+            /*archived_only*/ None,
+            /*new_thread_memory_mode*/ None,
         )
         .await;
 
@@ -2699,6 +2753,10 @@ impl CodexMessageProcessor {
                 return;
             }
         };
+        if let Err(error) = self.ensure_public_thread_access(thread_id).await {
+            self.outgoing.send_error(request_id, error).await;
+            return;
+        }
 
         let archived_path = match find_archived_thread_path_by_id_str(
             &self.config.codex_home,
@@ -2853,7 +2911,7 @@ impl CodexMessageProcessor {
                     self.thread_watch_manager
                         .loaded_status_for_thread(&thread.id)
                         .await,
-                    false,
+                    /*has_in_progress_turn*/ false,
                 );
                 self.attach_thread_name(thread_id, &mut thread).await;
                 let thread_id = thread.id.clone();
@@ -3046,6 +3104,14 @@ impl CodexMessageProcessor {
         let mut status_ids = Vec::with_capacity(summaries.len());
 
         for summary in summaries {
+            match self.team_visibility_for_summary(&summary).await {
+                Ok(TeamWorkflowThreadVisibility::HiddenChild { .. }) => continue,
+                Ok(_) => {}
+                Err(err) => warn!(
+                    thread_id = %summary.conversation_id,
+                    "failed to evaluate team visibility during thread/list: {err}"
+                ),
+            }
             let conversation_id = summary.conversation_id;
             thread_ids.insert(conversation_id);
 
@@ -3087,13 +3153,23 @@ impl CodexMessageProcessor {
         params: ThreadLoadedListParams,
     ) {
         let ThreadLoadedListParams { cursor, limit } = params;
-        let mut data = self
-            .thread_manager
-            .list_thread_ids()
-            .await
-            .into_iter()
-            .map(|thread_id| thread_id.to_string())
-            .collect::<Vec<_>>();
+        let mut data = Vec::new();
+        for thread_id in self.thread_manager.list_thread_ids().await {
+            let Ok(thread) = self.thread_manager.get_thread(thread_id).await else {
+                continue;
+            };
+            match self
+                .team_visibility_for_loaded_thread(thread_id, thread.as_ref())
+                .await
+            {
+                Ok(TeamWorkflowThreadVisibility::HiddenChild { .. }) => continue,
+                Ok(_) => data.push(thread_id.to_string()),
+                Err(err) => {
+                    warn!(%thread_id, "failed to evaluate team visibility during thread/loaded/list: {err}");
+                    data.push(thread_id.to_string());
+                }
+            }
+        }
 
         if data.is_empty() {
             let response = ThreadLoadedListResponse {
@@ -3154,6 +3230,25 @@ impl CodexMessageProcessor {
                 return;
             }
         };
+        match self.team_visibility_for_thread_id(thread_uuid).await {
+            Ok(TeamWorkflowThreadVisibility::HiddenChild { .. }) => {
+                self.send_invalid_request_error(
+                    request_id,
+                    format!("thread not found: {thread_uuid}"),
+                )
+                .await;
+                return;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                self.send_internal_error(
+                    request_id,
+                    format!("failed to resolve team visibility for {thread_uuid}: {err}"),
+                )
+                .await;
+                return;
+            }
+        }
 
         let loaded_thread = self.thread_manager.get_thread(thread_uuid).await.ok();
         let loaded_thread_state_db = loaded_thread.as_ref().and_then(|thread| thread.state_db());
@@ -3289,6 +3384,171 @@ impl CodexMessageProcessor {
         self.outgoing.send_response(request_id, response).await;
     }
 
+    async fn team_workflow_session_read(
+        &self,
+        request_id: ConnectionRequestId,
+        params: TeamWorkflowSessionReadParams,
+    ) {
+        let TeamWorkflowSessionReadParams {
+            thread_id,
+            recent_tape_limit,
+        } = params;
+        let thread_id = match ThreadId::from_string(&thread_id) {
+            Ok(thread_id) => thread_id,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, format!("invalid thread id: {err}"))
+                    .await;
+                return;
+            }
+        };
+
+        match self.team_visibility_for_thread_id(thread_id).await {
+            Ok(TeamWorkflowThreadVisibility::HiddenChild { .. }) => {
+                self.send_invalid_request_error(
+                    request_id,
+                    format!("thread not found: {thread_id}"),
+                )
+                .await;
+                return;
+            }
+            Ok(TeamWorkflowThreadVisibility::NotTeam) => {
+                self.send_invalid_request_error(
+                    request_id,
+                    format!("thread is not a team workflow root: {thread_id}"),
+                )
+                .await;
+                return;
+            }
+            Ok(TeamWorkflowThreadVisibility::PublicRoot) => {}
+            Err(err) => {
+                self.send_internal_error(
+                    request_id,
+                    format!("failed to resolve team workflow session for {thread_id}: {err}"),
+                )
+                .await;
+                return;
+            }
+        }
+
+        let Some(session) = self
+            .load_team_workflow_session_for_thread(
+                thread_id,
+                recent_tape_limit
+                    .map(|value| value as usize)
+                    .unwrap_or(TEAM_WORKFLOW_TAPE_LIMIT),
+            )
+            .await
+        else {
+            self.send_invalid_request_error(
+                request_id,
+                format!("thread is not a team workflow root: {thread_id}"),
+            )
+            .await;
+            return;
+        };
+
+        self.outgoing
+            .send_response(request_id, TeamWorkflowSessionReadResponse { session })
+            .await;
+    }
+
+    async fn team_visibility_for_summary(
+        &self,
+        summary: &ConversationSummary,
+    ) -> std::io::Result<TeamWorkflowThreadVisibility> {
+        team_workflow_thread_visibility(summary.cwd.as_path(), summary.conversation_id).await
+    }
+
+    async fn team_visibility_for_loaded_thread(
+        &self,
+        thread_id: ThreadId,
+        thread: &CodexThread,
+    ) -> std::io::Result<TeamWorkflowThreadVisibility> {
+        let config_snapshot = thread.config_snapshot().await;
+        team_workflow_thread_visibility(config_snapshot.cwd.as_path(), thread_id).await
+    }
+
+    async fn team_visibility_for_thread_id(
+        &self,
+        thread_id: ThreadId,
+    ) -> std::io::Result<TeamWorkflowThreadVisibility> {
+        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
+            return self
+                .team_visibility_for_loaded_thread(thread_id, thread.as_ref())
+                .await;
+        }
+        if let Some(summary) =
+            read_summary_from_state_db_by_thread_id(&self.config, thread_id).await
+        {
+            return self.team_visibility_for_summary(&summary).await;
+        }
+        let fallback_provider = self.config.model_provider_id.as_str();
+        if let Ok(Some(rollout_path)) =
+            find_thread_path_by_id_str(&self.config.codex_home, &thread_id.to_string()).await
+            && let Ok(summary) =
+                read_summary_from_rollout(rollout_path.as_path(), fallback_provider).await
+        {
+            return self.team_visibility_for_summary(&summary).await;
+        }
+        if let Ok(Some(rollout_path)) =
+            find_archived_thread_path_by_id_str(&self.config.codex_home, &thread_id.to_string())
+                .await
+            && let Ok(summary) =
+                read_summary_from_rollout(rollout_path.as_path(), fallback_provider).await
+        {
+            return self.team_visibility_for_summary(&summary).await;
+        }
+        Ok(TeamWorkflowThreadVisibility::NotTeam)
+    }
+
+    async fn ensure_public_thread_access(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<(), JSONRPCErrorError> {
+        match self.team_visibility_for_thread_id(thread_id).await {
+            Ok(TeamWorkflowThreadVisibility::HiddenChild { .. }) => Err(JSONRPCErrorError {
+                code: INVALID_REQUEST_ERROR_CODE,
+                message: format!("thread not found: {thread_id}"),
+                data: None,
+            }),
+            Ok(
+                TeamWorkflowThreadVisibility::NotTeam | TeamWorkflowThreadVisibility::PublicRoot,
+            ) => Ok(()),
+            Err(err) => Err(JSONRPCErrorError {
+                code: INTERNAL_ERROR_CODE,
+                message: format!(
+                    "failed to resolve team workflow visibility for {thread_id}: {err}"
+                ),
+                data: None,
+            }),
+        }
+    }
+
+    async fn load_team_workflow_session_for_thread(
+        &self,
+        thread_id: ThreadId,
+        recent_tape_limit: usize,
+    ) -> Option<TeamWorkflowSession> {
+        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
+            let config_snapshot = thread.config_snapshot().await;
+            if let Ok(Some(session)) = load_public_team_workflow_session(
+                config_snapshot.cwd.as_path(),
+                thread_id,
+                recent_tape_limit,
+            )
+            .await
+            {
+                return Some(map_team_workflow_session(session));
+            }
+        }
+        let summary = read_summary_from_state_db_by_thread_id(&self.config, thread_id).await?;
+        let session =
+            load_public_team_workflow_session(summary.cwd.as_path(), thread_id, recent_tape_limit)
+                .await
+                .ok()??;
+        Some(map_team_workflow_session(session))
+    }
+
     pub(crate) fn thread_created_receiver(&self) -> broadcast::Receiver<ThreadId> {
         self.thread_manager.subscribe_thread_created()
     }
@@ -3318,17 +3578,41 @@ impl CodexMessageProcessor {
         thread_id: ThreadId,
         connection_ids: Vec<ConnectionId>,
     ) {
+        let visibility = self.team_visibility_for_thread_id(thread_id).await.ok();
         if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
-            let config_snapshot = thread.config_snapshot().await;
-            let loaded_thread =
-                build_thread_from_snapshot(thread_id, &config_snapshot, thread.rollout_path());
-            self.thread_watch_manager.upsert_thread(loaded_thread).await;
+            if !matches!(
+                visibility,
+                Some(TeamWorkflowThreadVisibility::HiddenChild { .. })
+            ) {
+                let config_snapshot = thread.config_snapshot().await;
+                let loaded_thread =
+                    build_thread_from_snapshot(thread_id, &config_snapshot, thread.rollout_path());
+                self.thread_watch_manager.upsert_thread(loaded_thread).await;
+            } else {
+                self.thread_watch_manager
+                    .hide_thread(&thread_id.to_string())
+                    .await;
+                let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+                self.ensure_listener_task_running(
+                    thread_id,
+                    thread.clone(),
+                    thread_state,
+                    ApiVersion::V2,
+                )
+                .await;
+                return;
+            }
         }
 
         for connection_id in connection_ids {
             Self::log_listener_attach_result(
-                self.ensure_conversation_listener(thread_id, connection_id, false, ApiVersion::V2)
-                    .await,
+                self.ensure_conversation_listener(
+                    thread_id,
+                    connection_id,
+                    /*raw_events_enabled*/ false,
+                    ApiVersion::V2,
+                )
+                .await,
                 thread_id,
                 connection_id,
                 "thread",
@@ -3463,7 +3747,7 @@ impl CodexMessageProcessor {
                     self.ensure_conversation_listener(
                         thread_id,
                         request_id.connection_id,
-                        false,
+                        /*raw_events_enabled*/ false,
                         ApiVersion::V2,
                     )
                     .await,
@@ -3495,7 +3779,11 @@ impl CodexMessageProcessor {
                     .loaded_status_for_thread(&thread.id)
                     .await;
 
-                set_thread_status_and_interrupt_stale_turns(&mut thread, thread_status, false);
+                set_thread_status_and_interrupt_stale_turns(
+                    &mut thread,
+                    thread_status,
+                    /*has_live_in_progress_turn*/ false,
+                );
 
                 let response = ThreadResumeResponse {
                     thread,
@@ -3813,7 +4101,7 @@ impl CodexMessageProcessor {
         if let Err(message) = populate_thread_turns(
             &mut thread,
             ThreadTurnSource::HistoryItems(&history_items),
-            None,
+            /*active_turn*/ None,
         )
         .await
         {
@@ -3930,7 +4218,7 @@ impl CodexMessageProcessor {
             sandbox,
             base_instructions,
             developer_instructions,
-            None,
+            /*personality*/ None,
         );
         typesafe_overrides.ephemeral = ephemeral.then_some(true);
         // Derive a Config using the same logic as new conversation, honoring overrides if provided.
@@ -4001,7 +4289,7 @@ impl CodexMessageProcessor {
             self.ensure_conversation_listener(
                 thread_id,
                 request_id.connection_id,
-                false,
+                /*raw_events_enabled*/ false,
                 ApiVersion::V2,
             )
             .await,
@@ -4035,7 +4323,8 @@ impl CodexMessageProcessor {
         } else {
             let config_snapshot = forked_thread.config_snapshot().await;
             // forked thread names do not inherit the source thread name
-            let mut thread = build_thread_from_snapshot(thread_id, &config_snapshot, None);
+            let mut thread =
+                build_thread_from_snapshot(thread_id, &config_snapshot, /*path*/ None);
             let history_items = match read_rollout_items_from_rollout(rollout_path.as_path()).await
             {
                 Ok(items) => items,
@@ -4055,7 +4344,7 @@ impl CodexMessageProcessor {
             if let Err(message) = populate_thread_turns(
                 &mut thread,
                 ThreadTurnSource::HistoryItems(&history_items),
-                None,
+                /*active_turn*/ None,
             )
             .await
             {
@@ -4069,7 +4358,7 @@ impl CodexMessageProcessor {
             && let Err(message) = populate_thread_turns(
                 &mut thread,
                 ThreadTurnSource::RolloutPath(fork_rollout_path.as_path()),
-                None,
+                /*active_turn*/ None,
             )
             .await
         {
@@ -4085,7 +4374,7 @@ impl CodexMessageProcessor {
             self.thread_watch_manager
                 .loaded_status_for_thread(&thread.id)
                 .await,
-            false,
+            /*has_in_progress_turn*/ false,
         );
 
         let response = ThreadForkResponse {
@@ -4398,7 +4687,7 @@ impl CodexMessageProcessor {
         params: ExperimentalFeatureListParams,
     ) {
         let ExperimentalFeatureListParams { cursor, limit } = params;
-        let config = match self.load_latest_config(None).await {
+        let config = match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -4513,7 +4802,7 @@ impl CodexMessageProcessor {
     }
 
     async fn mcp_server_refresh(&self, request_id: ConnectionRequestId, _params: Option<()>) {
-        let config = match self.load_latest_config(None).await {
+        let config = match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -4572,7 +4861,7 @@ impl CodexMessageProcessor {
         request_id: ConnectionRequestId,
         params: McpServerOauthLoginParams,
     ) {
-        let config = match self.load_latest_config(None).await {
+        let config = match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -4684,7 +4973,7 @@ impl CodexMessageProcessor {
         let request = request_id.clone();
 
         let outgoing = Arc::clone(&self.outgoing);
-        let config = match self.load_latest_config(None).await {
+        let config = match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request, error).await;
@@ -4856,7 +5145,7 @@ impl CodexMessageProcessor {
     async fn finalize_thread_teardown(&mut self, thread_id: ThreadId) {
         self.pending_thread_unloads.lock().await.remove(&thread_id);
         self.outgoing
-            .cancel_requests_for_thread(thread_id, None)
+            .cancel_requests_for_thread(thread_id, /*error*/ None)
             .await;
         self.thread_state_manager
             .remove_thread_state(thread_id)
@@ -4919,7 +5208,7 @@ impl CodexMessageProcessor {
             // Any pending app-server -> client requests for this thread can no longer be
             // answered; cancel their callbacks before shutdown/unload.
             self.outgoing
-                .cancel_requests_for_thread(thread_id, None)
+                .cancel_requests_for_thread(thread_id, /*error*/ None)
                 .await;
             self.thread_state_manager
                 .remove_thread_state(thread_id)
@@ -5092,7 +5381,7 @@ impl CodexMessageProcessor {
     }
 
     async fn apps_list(&self, request_id: ConnectionRequestId, params: AppsListParams) {
-        let mut config = match self.load_latest_config(None).await {
+        let mut config = match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -5389,7 +5678,7 @@ impl CodexMessageProcessor {
         } = params;
         let roots = cwds.unwrap_or_default();
 
-        let mut config = match self.load_latest_config(None).await {
+        let mut config = match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => config,
             Err(err) => {
                 self.outgoing.send_error(request_id, err).await;
@@ -5422,7 +5711,7 @@ impl CodexMessageProcessor {
                 }
             }
 
-            config = match self.load_latest_config(None).await {
+            config = match self.load_latest_config(/*fallback_cwd*/ None).await {
                 Ok(config) => config,
                 Err(err) => {
                     self.outgoing.send_error(request_id, err).await;
@@ -5439,6 +5728,9 @@ impl CodexMessageProcessor {
                     .map(|marketplace| PluginMarketplaceEntry {
                         name: marketplace.name,
                         path: marketplace.path,
+                        interface: marketplace.interface.map(|interface| MarketplaceInterface {
+                            display_name: interface.display_name,
+                        }),
                         plugins: marketplace
                             .plugins
                             .into_iter()
@@ -5665,6 +5957,7 @@ impl CodexMessageProcessor {
         let PluginInstallParams {
             marketplace_path,
             plugin_name,
+            force_remote_sync,
         } = params;
         let config_cwd = marketplace_path.as_path().parent().map(Path::to_path_buf);
 
@@ -5674,7 +5967,23 @@ impl CodexMessageProcessor {
             marketplace_path,
         };
 
-        match plugins_manager.install_plugin(request).await {
+        let install_result = if force_remote_sync {
+            let config = match self.load_latest_config(config_cwd.clone()).await {
+                Ok(config) => config,
+                Err(err) => {
+                    self.outgoing.send_error(request_id, err).await;
+                    return;
+                }
+            };
+            let auth = self.auth_manager.auth().await;
+            plugins_manager
+                .install_plugin_with_remote_sync(&config, auth.as_ref(), request)
+                .await
+        } else {
+            plugins_manager.install_plugin(request).await
+        };
+
+        match install_result {
             Ok(result) => {
                 let config = match self.load_latest_config(config_cwd).await {
                     Ok(config) => config,
@@ -5692,9 +6001,9 @@ impl CodexMessageProcessor {
                     Vec::new()
                 } else {
                     let (all_connectors_result, accessible_connectors_result) = tokio::join!(
-                        connectors::list_all_connectors_with_options(&config, true),
+                        connectors::list_all_connectors_with_options(&config, /*force_refetch*/ true),
                         connectors::list_accessible_connectors_from_mcp_tools_with_options_and_status(
-                            &config, true
+                            &config, /*force_refetch*/ true
                         ),
                     );
 
@@ -5775,6 +6084,13 @@ impl CodexMessageProcessor {
                         )
                         .await;
                     }
+                    CorePluginInstallError::Remote(err) => {
+                        self.send_internal_error(
+                            request_id,
+                            format!("failed to enable remote plugin: {err}"),
+                        )
+                        .await;
+                    }
                     CorePluginInstallError::Join(err) => {
                         self.send_internal_error(
                             request_id,
@@ -5799,9 +6115,29 @@ impl CodexMessageProcessor {
         request_id: ConnectionRequestId,
         params: PluginUninstallParams,
     ) {
+        let PluginUninstallParams {
+            plugin_id,
+            force_remote_sync,
+        } = params;
         let plugins_manager = self.thread_manager.plugins_manager();
 
-        match plugins_manager.uninstall_plugin(params.plugin_id).await {
+        let uninstall_result = if force_remote_sync {
+            let config = match self.load_latest_config(/*fallback_cwd*/ None).await {
+                Ok(config) => config,
+                Err(err) => {
+                    self.outgoing.send_error(request_id, err).await;
+                    return;
+                }
+            };
+            let auth = self.auth_manager.auth().await;
+            plugins_manager
+                .uninstall_plugin_with_remote_sync(&config, auth.as_ref(), plugin_id)
+                .await
+        } else {
+            plugins_manager.uninstall_plugin(plugin_id).await
+        };
+
+        match uninstall_result {
             Ok(()) => {
                 self.clear_plugin_related_caches();
                 self.outgoing
@@ -5820,6 +6156,13 @@ impl CodexMessageProcessor {
                         self.send_internal_error(
                             request_id,
                             format!("failed to clear plugin config: {err}"),
+                        )
+                        .await;
+                    }
+                    CorePluginUninstallError::Remote(err) => {
+                        self.send_internal_error(
+                            request_id,
+                            format!("failed to uninstall remote plugin: {err}"),
                         )
                         .await;
                     }
@@ -6046,7 +6389,7 @@ impl CodexMessageProcessor {
             .ensure_conversation_listener(
                 thread_id,
                 request_id.connection_id,
-                false,
+                /*raw_events_enabled*/ false,
                 ApiVersion::V2,
             )
             .await
@@ -6327,7 +6670,7 @@ impl CodexMessageProcessor {
                 usize::MAX,
                 config,
                 rollout_path,
-                false,
+                /*persist_extended_history*/ false,
                 self.request_trace_context(request_id).await,
             )
             .await
@@ -6341,7 +6684,7 @@ impl CodexMessageProcessor {
             self.ensure_conversation_listener(
                 thread_id,
                 request_id.connection_id,
-                false,
+                /*raw_events_enabled*/ false,
                 ApiVersion::V2,
             )
             .await,
@@ -6362,7 +6705,7 @@ impl CodexMessageProcessor {
                         self.thread_watch_manager
                             .loaded_status_for_thread(&thread.id)
                             .await,
-                        false,
+                        /*has_in_progress_turn*/ false,
                     );
                     let notif = ThreadStartedNotification { thread };
                     self.outgoing
@@ -6722,6 +7065,13 @@ impl CodexMessageProcessor {
                             codex_home.as_path(),
                         )
                         .await;
+                        maybe_publish_team_workflow_session_update(
+                            outgoing_for_task.as_ref(),
+                            &thread_state_manager,
+                            conversation.clone(),
+                            conversation_id,
+                        )
+                        .await;
                     }
                     listener_command = listener_command_rx.recv() => {
                         let Some(listener_command) = listener_command else {
@@ -7050,7 +7400,7 @@ impl CodexMessageProcessor {
         tokio::spawn(async move {
             let derived_config = derive_config_for_cwd(
                 &cli_overrides,
-                None,
+                /*request_overrides*/ None,
                 ConfigOverrides {
                     cwd: Some(command_cwd.clone()),
                     ..Default::default()
@@ -7138,6 +7488,56 @@ async fn handle_thread_listener_command(
             let _ = completion_tx.send(());
         }
     }
+}
+
+async fn maybe_publish_team_workflow_session_update(
+    outgoing: &OutgoingMessageSender,
+    thread_state_manager: &ThreadStateManager,
+    conversation: Arc<CodexThread>,
+    thread_id: ThreadId,
+) {
+    let config_snapshot = conversation.config_snapshot().await;
+    let visibility =
+        match team_workflow_thread_visibility(config_snapshot.cwd.as_path(), thread_id).await {
+            Ok(visibility) => visibility,
+            Err(err) => {
+                warn!(
+                    %thread_id,
+                    "failed to resolve team workflow visibility for event publish: {err}"
+                );
+                return;
+            }
+        };
+    let root_thread_id = match visibility {
+        TeamWorkflowThreadVisibility::NotTeam => return,
+        TeamWorkflowThreadVisibility::PublicRoot => thread_id,
+        TeamWorkflowThreadVisibility::HiddenChild { root_thread_id } => root_thread_id,
+    };
+    let Some(session) = load_public_team_workflow_session(
+        config_snapshot.cwd.as_path(),
+        root_thread_id,
+        TEAM_WORKFLOW_TAPE_LIMIT,
+    )
+    .await
+    .ok()
+    .flatten()
+    .map(map_team_workflow_session) else {
+        return;
+    };
+    let connection_ids = thread_state_manager
+        .subscribed_connection_ids(root_thread_id)
+        .await;
+    if connection_ids.is_empty() {
+        return;
+    }
+    outgoing
+        .send_server_notification_to_connections(
+            &connection_ids,
+            ServerNotification::TeamWorkflowSessionUpdated(
+                TeamWorkflowSessionUpdatedNotification { session },
+            ),
+        )
+        .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8169,6 +8569,172 @@ pub(crate) fn summary_to_thread(summary: ConversationSummary) -> Thread {
     }
 }
 
+fn map_team_workflow_session(session: CoreTeamWorkflowSession) -> TeamWorkflowSession {
+    TeamWorkflowSession {
+        root_thread_id: session.root_thread_id.to_string(),
+        root_team_id: session.root_team_id,
+        root_role: session.root_role,
+        current_phase: map_team_workflow_phase(session.current_phase),
+        max_depth: session.max_depth,
+        active_team_count: session.active_team_count,
+        blocked_team_count: session.blocked_team_count,
+        stale_resource_count: session.stale_resource_count,
+        global_governance_path: session.global_governance_path,
+        team_state_index_path: session.team_state_index_path,
+        teams: session
+            .teams
+            .into_iter()
+            .map(map_team_workflow_team)
+            .collect(),
+        updated_at: session.updated_at,
+    }
+}
+
+fn map_team_workflow_team(team: CoreTeamWorkflowTeam) -> TeamWorkflowTeam {
+    TeamWorkflowTeam {
+        team_id: team.team_id,
+        thread_id: team.thread_id.to_string(),
+        parent_team_id: team.parent_team_id,
+        depth: team.depth,
+        kind: match team.kind {
+            CoreTeamWorkflowTeamKind::Root => TeamWorkflowTeamKind::Root,
+            CoreTeamWorkflowTeamKind::Child => TeamWorkflowTeamKind::Child,
+        },
+        role: team.role,
+        nickname: team.nickname,
+        current_phase: map_team_workflow_phase(team.current_phase),
+        blockers: team.blockers,
+        next_steps: team.next_steps,
+        active_child_team_ids: team.active_child_team_ids,
+        governance_doc_path: team.governance_doc_path,
+        global_governance_path: team.global_governance_path,
+        produced_artifacts: team.produced_artifacts,
+        worktree: team.worktree.map(map_team_workflow_worktree),
+        environment: map_team_workflow_environment(team.environment),
+        integration: team.integration.map(map_team_workflow_integration),
+        recent_tape: team
+            .recent_tape
+            .into_iter()
+            .map(map_team_workflow_tape_entry)
+            .collect(),
+        updated_at: team.updated_at,
+    }
+}
+
+fn map_team_workflow_phase(phase: CoreTeamWorkflowPhase) -> TeamWorkflowPhase {
+    match phase {
+        CoreTeamWorkflowPhase::Bootstrap => TeamWorkflowPhase::Bootstrap,
+        CoreTeamWorkflowPhase::Design => TeamWorkflowPhase::Design,
+        CoreTeamWorkflowPhase::Development => TeamWorkflowPhase::Development,
+        CoreTeamWorkflowPhase::Review => TeamWorkflowPhase::Review,
+        CoreTeamWorkflowPhase::Replan => TeamWorkflowPhase::Replan,
+    }
+}
+
+fn map_team_workflow_environment(
+    environment: CoreTeamWorkflowEnvironment,
+) -> TeamWorkflowEnvironment {
+    TeamWorkflowEnvironment {
+        managed_resources: environment
+            .managed_resources
+            .into_iter()
+            .map(map_team_workflow_resource)
+            .collect(),
+        stale_resources: environment
+            .stale_resources
+            .into_iter()
+            .map(map_team_workflow_resource)
+            .collect(),
+        cleanup_notes: environment.cleanup_notes,
+        last_cleanup_at: environment.last_cleanup_at,
+    }
+}
+
+fn map_team_workflow_resource(resource: CoreTeamWorkflowResource) -> TeamWorkflowResource {
+    TeamWorkflowResource {
+        resource_id: resource.resource_id,
+        kind: match resource.kind {
+            CoreTeamWorkflowResourceKind::Worktree => TeamWorkflowResourceKind::Worktree,
+            CoreTeamWorkflowResourceKind::TestEnvironment => {
+                TeamWorkflowResourceKind::TestEnvironment
+            }
+            CoreTeamWorkflowResourceKind::Other => TeamWorkflowResourceKind::Other,
+        },
+        path: resource.path,
+        status: match resource.status {
+            CoreTeamWorkflowResourceStatus::Active => TeamWorkflowResourceStatus::Active,
+            CoreTeamWorkflowResourceStatus::Stale => TeamWorkflowResourceStatus::Stale,
+            CoreTeamWorkflowResourceStatus::Cleaned => TeamWorkflowResourceStatus::Cleaned,
+        },
+        cleanup_required: resource.cleanup_required,
+        last_verified_at: resource.last_verified_at,
+    }
+}
+
+fn map_team_workflow_worktree(worktree: CoreTeamWorkflowWorktree) -> TeamWorkflowWorktree {
+    TeamWorkflowWorktree {
+        branch_name: worktree.branch_name,
+        current_branch: worktree.current_branch,
+        checkout_path: worktree.checkout_path,
+        source_checkout_path: worktree.source_checkout_path,
+        repo_root: worktree.repo_root,
+        base_commit: worktree.base_commit,
+        head_commit: worktree.head_commit,
+        managed: worktree.managed,
+        updated_at: worktree.updated_at,
+    }
+}
+
+fn map_team_workflow_integration(
+    integration: CoreTeamWorkflowIntegration,
+) -> TeamWorkflowIntegration {
+    TeamWorkflowIntegration {
+        source_team_id: integration.source_team_id,
+        target_team_id: integration.target_team_id,
+        source_branch: integration.source_branch,
+        source_checkout_path: integration.source_checkout_path,
+        target_checkout_path: integration.target_checkout_path,
+        base_commit: integration.base_commit,
+        head_commit: integration.head_commit,
+        patch_path: integration.patch_path,
+        accepted_modes: integration
+            .accepted_modes
+            .into_iter()
+            .map(|mode| match mode {
+                CoreTeamWorkflowIntegrationMode::Merge => TeamWorkflowIntegrationMode::Merge,
+                CoreTeamWorkflowIntegrationMode::CherryPick => {
+                    TeamWorkflowIntegrationMode::CherryPick
+                }
+                CoreTeamWorkflowIntegrationMode::Patch => TeamWorkflowIntegrationMode::Patch,
+            })
+            .collect(),
+        review_ready: integration.review_ready,
+        updated_at: integration.updated_at,
+    }
+}
+
+fn map_team_workflow_tape_entry(entry: CoreTeamWorkflowTapeEntry) -> TeamWorkflowTapeEntry {
+    TeamWorkflowTapeEntry {
+        entry_id: entry.entry_id,
+        team_id: entry.team_id,
+        kind: match entry.kind {
+            CoreTeamWorkflowTapeKind::Bootstrap => TeamWorkflowTapeKind::Bootstrap,
+            CoreTeamWorkflowTapeKind::WorktreeAssigned => TeamWorkflowTapeKind::WorktreeAssigned,
+            CoreTeamWorkflowTapeKind::Delegation => TeamWorkflowTapeKind::Delegation,
+            CoreTeamWorkflowTapeKind::PeerSync => TeamWorkflowTapeKind::PeerSync,
+            CoreTeamWorkflowTapeKind::ArtifactHandoff => TeamWorkflowTapeKind::ArtifactHandoff,
+            CoreTeamWorkflowTapeKind::Resume => TeamWorkflowTapeKind::Resume,
+            CoreTeamWorkflowTapeKind::IntegrationReady => TeamWorkflowTapeKind::IntegrationReady,
+        },
+        summary: entry.summary,
+        counterpart_team_id: entry.counterpart_team_id,
+        phase: entry.phase.map(map_team_workflow_phase),
+        anchor: entry.anchor,
+        artifact_refs: entry.artifact_refs,
+        created_at: entry.created_at,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8177,6 +8743,13 @@ mod tests {
     use anyhow::Result;
     use codex_app_server_protocol::ServerRequestPayload;
     use codex_app_server_protocol::ToolRequestUserInputParams;
+    use codex_core::team_api::TeamWorkflowPublicEnvironment;
+    use codex_core::team_api::TeamWorkflowPublicPhase;
+    use codex_core::team_api::TeamWorkflowPublicSession;
+    use codex_core::team_api::TeamWorkflowPublicTapeEntry;
+    use codex_core::team_api::TeamWorkflowPublicTapeKind;
+    use codex_core::team_api::TeamWorkflowPublicTeam;
+    use codex_core::team_api::TeamWorkflowPublicTeamKind;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::SubAgentSource;
     use pretty_assertions::assert_eq;
@@ -8266,6 +8839,75 @@ mod tests {
                 "errorCode": "RequestFailed",
                 "detail": "failed to load your workspace-managed config",
             }))
+        );
+    }
+
+    #[test]
+    fn map_team_workflow_session_preserves_redacted_status_and_artifacts() {
+        let session = map_team_workflow_session(TeamWorkflowPublicSession {
+            root_thread_id: ThreadId::new(),
+            root_team_id: "root-team".to_string(),
+            root_role: "root-scheduler".to_string(),
+            current_phase: TeamWorkflowPublicPhase::Review,
+            max_depth: 5,
+            active_team_count: 2,
+            blocked_team_count: 1,
+            stale_resource_count: 1,
+            global_governance_path: PathBuf::from(".codex/AGENT.md"),
+            team_state_index_path: PathBuf::from(".codex/team-state/index.json"),
+            teams: vec![TeamWorkflowPublicTeam {
+                team_id: "child-team".to_string(),
+                thread_id: ThreadId::new(),
+                parent_team_id: Some("root-team".to_string()),
+                depth: 1,
+                kind: TeamWorkflowPublicTeamKind::Child,
+                role: "development-lead".to_string(),
+                nickname: Some("Ada".to_string()),
+                current_phase: TeamWorkflowPublicPhase::Development,
+                blockers: vec!["waiting on review".to_string()],
+                next_steps: vec!["package handoff".to_string()],
+                active_child_team_ids: vec![],
+                governance_doc_path: PathBuf::from(".codex/team-state/child-team/AGENT_TEAM.md"),
+                global_governance_path: PathBuf::from(".codex/AGENT.md"),
+                produced_artifacts: vec!["artifacts/handoff.md".to_string()],
+                worktree: None,
+                environment: TeamWorkflowPublicEnvironment {
+                    managed_resources: vec![],
+                    stale_resources: vec![],
+                    cleanup_notes: vec!["remove sandbox".to_string()],
+                    last_cleanup_at: None,
+                },
+                integration: None,
+                recent_tape: vec![TeamWorkflowPublicTapeEntry {
+                    entry_id: "entry-1".to_string(),
+                    team_id: "child-team".to_string(),
+                    kind: TeamWorkflowPublicTapeKind::ArtifactHandoff,
+                    summary: "Artifact handoff recorded.".to_string(),
+                    counterpart_team_id: Some("root-team".to_string()),
+                    phase: Some(TeamWorkflowPublicPhase::Review),
+                    anchor: Some("delivery".to_string()),
+                    artifact_refs: vec![PathBuf::from("artifacts/handoff.md")],
+                    created_at: "2026-03-17T00:00:00Z".to_string(),
+                }],
+                updated_at: "2026-03-17T00:00:00Z".to_string(),
+            }],
+            updated_at: "2026-03-17T00:00:00Z".to_string(),
+        });
+
+        assert_eq!(session.current_phase, TeamWorkflowPhase::Review);
+        assert_eq!(session.active_team_count, 2);
+        assert_eq!(session.teams.len(), 1);
+        assert_eq!(
+            session.teams[0].produced_artifacts,
+            vec!["artifacts/handoff.md"]
+        );
+        assert_eq!(
+            session.teams[0].recent_tape[0].kind,
+            TeamWorkflowTapeKind::ArtifactHandoff
+        );
+        assert_eq!(
+            session.teams[0].recent_tape[0].summary,
+            "Artifact handoff recorded."
         );
     }
 

@@ -1,0 +1,250 @@
+name: fork-build-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build. Defaults to the selected workflow ref.
+        required: false
+        type: string
+        default: ""
+      publish_to_release:
+        description: Publish packaged artifacts to GitHub Releases.
+        required: true
+        type: boolean
+        default: true
+      release_tag:
+        description: Release tag to create or update. Defaults to manual-build-<run id>.
+        required: false
+        type: string
+        default: ""
+      release_name:
+        description: Release title. Defaults to Manual build <tag>.
+        required: false
+        type: string
+        default: ""
+      prerelease:
+        description: Mark the GitHub release as a prerelease.
+        required: true
+        type: boolean
+        default: true
+      draft:
+        description: Create the GitHub release as a draft.
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.ref != '' && inputs.ref || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate-linux-x64:
+    name: validate-linux-x64
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref != '' && inputs.ref || github.ref }}
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+
+      - name: Run targeted release validation tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p codex-app-server-protocol serialize_team_workflow_session_read -- --exact
+          cargo test -p codex-app-server-protocol serialize_team_workflow_session_updated_notification -- --exact
+          cargo test -p codex-core public_team_visibility_hides_child_threads_but_keeps_root_public -- --exact
+          cargo test -p codex-app-server hidden_thread_suppresses_status_notifications_and_public_status -- --exact
+
+      - name: Validate team ops UI syntax
+        shell: bash
+        run: node --check app-server/src/team_ops_ui/app.js
+
+  build-linux-x64:
+    name: build-linux-x64
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref != '' && inputs.ref || github.ref }}
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build Linux release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --target x86_64-unknown-linux-gnu --release \
+            --bin codex \
+            --bin codex-app-server \
+            --bin codex-responses-api-proxy
+
+      - name: Package Linux release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage_dir="dist/linux-x64"
+          mkdir -p "${stage_dir}"
+          cp target/x86_64-unknown-linux-gnu/release/codex "${stage_dir}/codex"
+          cp target/x86_64-unknown-linux-gnu/release/codex-app-server "${stage_dir}/codex-app-server"
+          cp target/x86_64-unknown-linux-gnu/release/codex-responses-api-proxy "${stage_dir}/codex-responses-api-proxy"
+          tar -C "${stage_dir}" -czf dist/codex-linux-x64.tar.gz .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: codex-linux-x64
+          path: codex-rs/dist/codex-linux-x64.tar.gz
+
+  build-windows-x64:
+    name: build-windows-x64
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref != '' && inputs.ref || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build Windows release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --target x86_64-pc-windows-msvc --release \
+            --bin codex \
+            --bin codex-app-server \
+            --bin codex-responses-api-proxy \
+            --bin codex-windows-sandbox-setup \
+            --bin codex-command-runner
+
+      - name: Package Windows release archive
+        shell: powershell
+        run: |
+          $stageDir = Join-Path $PWD "dist/windows-x64"
+          New-Item -ItemType Directory -Force $stageDir | Out-Null
+
+          Copy-Item "target/x86_64-pc-windows-msvc/release/codex.exe" "$stageDir/codex.exe"
+          Copy-Item "target/x86_64-pc-windows-msvc/release/codex-app-server.exe" "$stageDir/codex-app-server.exe"
+          Copy-Item "target/x86_64-pc-windows-msvc/release/codex-responses-api-proxy.exe" "$stageDir/codex-responses-api-proxy.exe"
+          Copy-Item "target/x86_64-pc-windows-msvc/release/codex-windows-sandbox-setup.exe" "$stageDir/codex-windows-sandbox-setup.exe"
+          Copy-Item "target/x86_64-pc-windows-msvc/release/codex-command-runner.exe" "$stageDir/codex-command-runner.exe"
+
+          $archivePath = Join-Path $PWD "dist/codex-windows-x64.zip"
+          if (Test-Path $archivePath) {
+            Remove-Item $archivePath -Force
+          }
+          Compress-Archive -Path "$stageDir\\*" -DestinationPath $archivePath -Force
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: codex-windows-x64
+          path: codex-rs/dist/codex-windows-x64.zip
+
+  publish-release:
+    name: publish-release
+    if: ${{ inputs.publish_to_release }}
+    needs:
+      - validate-linux-x64
+      - build-linux-x64
+      - build-windows-x64
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+
+      - name: Show packaged files
+        shell: bash
+        run: find dist -type f | sort
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+          INPUT_NAME: ${{ inputs.release_name }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+          INPUT_DRAFT: ${{ inputs.draft }}
+          TARGET_REF: ${{ inputs.ref != '' && inputs.ref || github.ref_name }}
+          TARGET_COMMITISH: ${{ inputs.ref != '' && inputs.ref || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${INPUT_TAG}"
+          if [[ -z "${tag}" ]]; then
+            tag="manual-build-${GITHUB_RUN_ID}"
+          fi
+
+          name="${INPUT_NAME}"
+          if [[ -z "${name}" ]]; then
+            name="Manual build ${tag}"
+          fi
+
+          notes=$(
+            cat <<EOF
+          Manual build for \`${TARGET_REF}\`.
+
+          Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          )
+
+          mapfile -t files < <(find dist -type f | sort)
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "No packaged artifacts found."
+            exit 1
+          fi
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" "${files[@]}" --clobber
+            gh release edit "${tag}" --title "${name}"
+          else
+            args=(
+              gh release create "${tag}"
+              --target "${TARGET_COMMITISH}"
+              --title "${name}"
+              --notes "${notes}"
+            )
+            if [[ "${INPUT_PRERELEASE}" == "true" ]]; then
+              args+=(--prerelease)
+            fi
+            if [[ "${INPUT_DRAFT}" == "true" ]]; then
+              args+=(--draft)
+            fi
+            args+=("${files[@]}")
+            "${args[@]}"
+          fi

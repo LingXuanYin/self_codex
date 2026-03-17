@@ -14,6 +14,7 @@ use crate::protocol::Op;
 use crate::protocol::SandboxPolicy;
 use crate::protocol::SessionSource;
 use crate::protocol::SubAgentSource;
+use crate::team::maybe_initialize_for_thread;
 use crate::tools::context::ToolOutput;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_protocol::ThreadId;
@@ -27,7 +28,9 @@ use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -61,6 +64,38 @@ fn thread_manager() -> ThreadManager {
         CodexAuth::from_api_key("dummy"),
         built_in_model_providers(/* openai_base_url */ None)["openai"].clone(),
     )
+}
+
+fn write_team_workflow(workspace: &std::path::Path) {
+    std::fs::create_dir_all(workspace.join(".codex")).expect("create .codex");
+    std::fs::write(
+        workspace.join(".codex").join("team-workflow.yaml"),
+        "version: 1\n",
+    )
+    .expect("write team workflow");
+}
+
+fn run_git(cwd: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .status()
+        .unwrap_or_else(|err| panic!("git {:?} failed to start: {err}", args));
+    assert!(
+        status.success(),
+        "git {:?} failed in {}",
+        args,
+        cwd.display()
+    );
+}
+
+fn init_git_repo(workspace: &Path) {
+    run_git(workspace, &["init", "--initial-branch=main"]);
+    run_git(workspace, &["config", "user.name", "Codex"]);
+    run_git(workspace, &["config", "user.email", "codex@example.com"]);
+    std::fs::write(workspace.join("README.md"), "seed\n").expect("write readme");
+    run_git(workspace, &["add", "README.md"]);
+    run_git(workspace, &["commit", "-m", "init"]);
 }
 
 fn expect_text_output<T>(output: T) -> (String, Option<bool>)
@@ -400,6 +435,113 @@ async fn spawn_agent_allows_depth_up_to_configured_max_depth() {
 }
 
 #[tokio::test]
+async fn spawn_agent_uses_artifact_manifest_for_team_workflow_child_handoff() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    write_team_workflow(temp_dir.path());
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        session.conversation_id,
+        &SessionSource::Exec,
+        None,
+    )
+    .await
+    .expect("initialize sender team");
+    let mut config = (*turn.config).clone();
+    config.cwd = temp_dir.path().to_path_buf();
+    turn.cwd = temp_dir.path().to_path_buf();
+    turn.config = Arc::new(config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({"message": "implement parser module"})),
+    );
+    let output = SpawnAgentHandler
+        .handle(invocation)
+        .await
+        .expect("spawn should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnAgentResult = serde_json::from_str(&content).expect("spawn result");
+    let agent_id = agent_id(&result.agent_id).expect("valid agent id");
+
+    let captured = manager
+        .captured_ops()
+        .into_iter()
+        .find_map(|(id, op)| match op {
+            Op::UserInput { items, .. } if id == agent_id => Some(items),
+            _ => None,
+        })
+        .expect("child input should be captured");
+    let text = match &captured[0] {
+        UserInput::Text { text, .. } => text.as_str(),
+        other => panic!("expected manifest text, got {other:?}"),
+    };
+    assert!(text.contains("protocol: openspec-artifacts"));
+    assert!(text.contains("artifact: "));
+    assert!(!text.contains("implement parser module"));
+}
+
+#[tokio::test]
+async fn spawn_agent_switches_child_thread_to_team_worktree() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(temp_dir.path());
+    write_team_workflow(temp_dir.path());
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        session.conversation_id,
+        &SessionSource::Exec,
+        None,
+    )
+    .await
+    .expect("initialize sender team");
+    let mut config = (*turn.config).clone();
+    config.cwd = temp_dir.path().to_path_buf();
+    turn.cwd = temp_dir.path().to_path_buf();
+    turn.config = Arc::new(config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({"message": "implement parser module"})),
+    );
+    let output = SpawnAgentHandler
+        .handle(invocation)
+        .await
+        .expect("spawn should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnAgentResult = serde_json::from_str(&content).expect("spawn result");
+    let agent_id = agent_id(&result.agent_id).expect("valid agent id");
+
+    let snapshot = manager
+        .get_thread(agent_id)
+        .await
+        .expect("spawned agent thread should exist")
+        .config_snapshot()
+        .await;
+    assert_ne!(snapshot.cwd, temp_dir.path());
+    assert!(snapshot.cwd.join(".git").exists());
+    assert!(snapshot.cwd.ends_with(Path::new("worktree")));
+}
+
+#[tokio::test]
 async fn send_input_rejects_empty_message() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -568,6 +710,151 @@ async fn send_input_accepts_structured_items() {
         .submit(Op::Shutdown {})
         .await
         .expect("shutdown should submit");
+}
+
+#[tokio::test]
+async fn send_input_keeps_raw_context_for_sibling_teams() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    write_team_workflow(temp_dir.path());
+    let parent_thread_id = ThreadId::new();
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        session.conversation_id,
+        &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth: 1,
+            agent_nickname: None,
+            agent_role: Some("design-lead".to_string()),
+        }),
+        None,
+    )
+    .await
+    .expect("initialize sender team");
+    let config = turn.config.as_ref().clone();
+    let thread = manager
+        .start_thread(config)
+        .await
+        .expect("start receiver thread");
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        thread.thread_id,
+        &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth: 1,
+            agent_nickname: None,
+            agent_role: Some("development-lead".to_string()),
+        }),
+        None,
+    )
+    .await
+    .expect("initialize receiver team");
+    let mut turn_config = (*turn.config).clone();
+    turn_config.cwd = temp_dir.path().to_path_buf();
+    turn.cwd = temp_dir.path().to_path_buf();
+    turn.config = Arc::new(turn_config);
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_nickname: None,
+        agent_role: Some("design-lead".to_string()),
+    });
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "send_input",
+        function_payload(
+            json!({"id": thread.thread_id.to_string(), "message": "align the interface"}),
+        ),
+    );
+    SendInputHandler
+        .handle(invocation)
+        .await
+        .expect("send should succeed");
+
+    let captured = manager
+        .captured_ops()
+        .into_iter()
+        .find_map(|(id, op)| match op {
+            Op::UserInput { items, .. } if id == thread.thread_id => Some(items),
+            _ => None,
+        })
+        .expect("receiver input should be captured");
+    match &captured[0] {
+        UserInput::Text { text, .. } => assert_eq!(text, "align the interface"),
+        other => panic!("expected raw sibling text, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn send_input_converts_vertical_team_message_into_artifact_manifest() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    write_team_workflow(temp_dir.path());
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        session.conversation_id,
+        &SessionSource::Exec,
+        None,
+    )
+    .await
+    .expect("initialize sender team");
+    let config = turn.config.as_ref().clone();
+    let thread = manager
+        .start_thread(config)
+        .await
+        .expect("start child thread");
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        thread.thread_id,
+        &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: session.conversation_id,
+            depth: 1,
+            agent_nickname: None,
+            agent_role: Some("review-lead".to_string()),
+        }),
+        None,
+    )
+    .await
+    .expect("initialize child team");
+    let mut turn_config = (*turn.config).clone();
+    turn_config.cwd = temp_dir.path().to_path_buf();
+    turn.cwd = temp_dir.path().to_path_buf();
+    turn.config = Arc::new(turn_config);
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "send_input",
+        function_payload(
+            json!({"id": thread.thread_id.to_string(), "message": "review the patch for boundary drift"}),
+        ),
+    );
+    SendInputHandler
+        .handle(invocation)
+        .await
+        .expect("send should succeed");
+
+    let captured = manager
+        .captured_ops()
+        .into_iter()
+        .find_map(|(id, op)| match op {
+            Op::UserInput { items, .. } if id == thread.thread_id => Some(items),
+            _ => None,
+        })
+        .expect("receiver input should be captured");
+    let text = match &captured[0] {
+        UserInput::Text { text, .. } => text.as_str(),
+        other => panic!("expected manifest text, got {other:?}"),
+    };
+    assert!(text.contains("protocol: openspec-artifacts"));
+    assert!(text.contains("artifact: "));
+    assert!(!text.contains("review the patch for boundary drift"));
 }
 
 #[tokio::test]
@@ -1105,7 +1392,8 @@ async fn build_agent_resume_config_clears_base_instructions() {
         .set(AskForApproval::OnRequest)
         .expect("approval policy set");
 
-    let config = build_agent_resume_config(&turn, 0).expect("resume config");
+    let config =
+        build_agent_resume_config(&turn, 0, turn.config.agent_max_depth).expect("resume config");
 
     let mut expected = (*turn.config).clone();
     expected.base_instructions = None;

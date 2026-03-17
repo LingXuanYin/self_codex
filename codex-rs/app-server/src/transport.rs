@@ -4,6 +4,9 @@ use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::OutgoingEnvelope;
 use crate::outgoing_message::OutgoingError;
 use crate::outgoing_message::OutgoingMessage;
+use crate::team_ops_ui::dashboard_handler;
+use crate::team_ops_ui::script_handler;
+use crate::team_ops_ui::stylesheet_handler;
 use axum::Router;
 use axum::extract::ConnectInfo;
 use axum::extract::State;
@@ -65,11 +68,14 @@ fn print_websocket_startup_banner(addr: SocketAddr) {
     let ready_url = colorize(&format!("http://{addr}/readyz"), Style::new().green());
     let health_label = colorize("healthz:", Style::new().dimmed());
     let health_url = colorize(&format!("http://{addr}/healthz"), Style::new().green());
+    let dashboard_label = colorize("team ops:", Style::new().dimmed());
+    let dashboard_url = colorize(&format!("http://{addr}/team-ops"), Style::new().green());
     let note_label = colorize("note:", Style::new().dimmed());
     eprintln!("{title}");
     eprintln!("  {listening_label} {listen_url}");
     eprintln!("  {ready_label} {ready_url}");
     eprintln!("  {health_label} {health_url}");
+    eprintln!("  {dashboard_label} {dashboard_url}");
     if addr.ip().is_loopback() {
         eprintln!(
             "  {note_label} binds localhost only (use SSH port-forwarding for remote access)"
@@ -321,6 +327,9 @@ pub(crate) async fn start_websocket_acceptor(
     let router = Router::new()
         .route("/readyz", get(health_check_handler))
         .route("/healthz", get(health_check_handler))
+        .route("/team-ops", get(dashboard_handler))
+        .route("/team-ops/app.js", get(script_handler))
+        .route("/team-ops/styles.css", get(stylesheet_handler))
         .fallback(any(websocket_upgrade_handler))
         .with_state(WebSocketListenerState {
             transport_event_tx,

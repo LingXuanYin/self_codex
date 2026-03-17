@@ -30,6 +30,7 @@ When running with `--listen ws://IP:PORT`, the same listener also serves basic H
 
 - `GET /readyz` returns `200 OK` once the listener is accepting new connections.
 - `GET /healthz` currently always returns `200 OK`.
+- `GET /team-ops` serves a lightweight team-operations dashboard for root-scheduler sessions.
 
 Websocket transport is currently experimental and unsupported. Do not rely on it for production workloads.
 
@@ -124,6 +125,13 @@ Example with notification opt-out:
 ```
 
 ## API Overview
+
+Team workflow extensions:
+
+- `teamWorkflow/sessionRead` returns the public team-workflow session for a root scheduler thread, including topology, redacted tape entries, artifacts, governance document paths, worktree state, and environment cleanup status.
+- `teamWorkflow/sessionUpdated` notifies subscribed root-scheduler clients whenever persisted team-workflow state changes.
+
+Hidden child-team threads stay private on the public app-server surface. They are suppressed from thread-listing and thread-status APIs, and external clients should keep sending user instructions through the root scheduler thread with the normal `turn/start` flow.
 
 - `thread/start` — create a new thread; emits `thread/started` (including the current `thread.status`) and auto-subscribes you to turn/item events for that thread.
 - `thread/resume` — reopen an existing thread by id so subsequent `turn/start` calls append to it.
@@ -941,7 +949,7 @@ Order of messages:
 
 ### Permission requests
 
-The built-in `request_permissions` tool sends an `item/permissions/requestApproval` JSON-RPC request to the client with the requested permission profile. Today that commonly means additional filesystem access, but the payload is intentionally general so future requests can include non-filesystem permissions too. This request is part of the v2 protocol surface.
+The built-in `request_permissions` tool sends an `item/permissions/requestApproval` JSON-RPC request to the client with the requested permission profile. This v2 payload mirrors the standalone tool's narrower permission shape, so it can request network access and additional filesystem access but does not include the broader `macos` branch used by command-execution `additionalPermissions`.
 
 ```json
 {
@@ -1321,6 +1329,8 @@ Field notes:
 - `resetsAt` is a Unix timestamp (seconds) for the next reset.
 
 ## Experimental API Opt-in
+
+The team workflow session APIs are part of this opt-in surface. Clients that need root-scheduler topology, redacted child-team status, or the `/team-ops` dashboard should set `capabilities.experimentalApi` to `true` during `initialize`.
 
 Some app-server methods and fields are intentionally gated behind an experimental capability with no backwards-compatible guarantees. This lets clients choose between:
 
