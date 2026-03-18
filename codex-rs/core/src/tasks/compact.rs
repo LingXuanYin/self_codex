@@ -4,6 +4,7 @@ use super::SessionTask;
 use super::SessionTaskContext;
 use crate::codex::TurnContext;
 use crate::state::TaskKind;
+use crate::team::record_team_compact_checkpoint;
 use async_trait::async_trait;
 use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
@@ -29,6 +30,13 @@ impl SessionTask for CompactTask {
         _cancellation_token: CancellationToken,
     ) -> Option<String> {
         let session = session.clone_session();
+        if let Err(err) =
+            record_team_compact_checkpoint(&ctx.cwd, &session.conversation_id.to_string()).await
+        {
+            return Some(format!(
+                "Team workflow blocked compact until the persisted checkpoint succeeded: {err}"
+            ));
+        }
         let _ = if crate::compact::should_use_remote_compact_task(&ctx.provider) {
             let _ = session.services.session_telemetry.counter(
                 "codex.task.compact",

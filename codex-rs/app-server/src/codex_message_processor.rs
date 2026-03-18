@@ -111,8 +111,11 @@ use codex_app_server_protocol::SkillsRemoteReadResponse;
 use codex_app_server_protocol::SkillsRemoteWriteParams;
 use codex_app_server_protocol::SkillsRemoteWriteResponse;
 use codex_app_server_protocol::TeamWorkflowEnvironment;
+use codex_app_server_protocol::TeamWorkflowHandoff;
 use codex_app_server_protocol::TeamWorkflowIntegration;
 use codex_app_server_protocol::TeamWorkflowIntegrationMode;
+use codex_app_server_protocol::TeamWorkflowLifecycle;
+use codex_app_server_protocol::TeamWorkflowLifecycleState;
 use codex_app_server_protocol::TeamWorkflowMemoryProvider;
 use codex_app_server_protocol::TeamWorkflowMemoryProviderHealth;
 use codex_app_server_protocol::TeamWorkflowMemoryProviderMode;
@@ -120,6 +123,7 @@ use codex_app_server_protocol::TeamWorkflowPhase;
 use codex_app_server_protocol::TeamWorkflowResource;
 use codex_app_server_protocol::TeamWorkflowResourceKind;
 use codex_app_server_protocol::TeamWorkflowResourceStatus;
+use codex_app_server_protocol::TeamWorkflowRootAgent;
 use codex_app_server_protocol::TeamWorkflowSession;
 use codex_app_server_protocol::TeamWorkflowSessionReadParams;
 use codex_app_server_protocol::TeamWorkflowSessionReadResponse;
@@ -257,8 +261,11 @@ use codex_core::state_db::StateDbHandle;
 use codex_core::state_db::get_state_db;
 use codex_core::state_db::reconcile_rollout;
 use codex_core::team_api::TeamWorkflowPublicEnvironment as CoreTeamWorkflowEnvironment;
+use codex_core::team_api::TeamWorkflowPublicHandoff as CoreTeamWorkflowHandoff;
 use codex_core::team_api::TeamWorkflowPublicIntegration as CoreTeamWorkflowIntegration;
 use codex_core::team_api::TeamWorkflowPublicIntegrationMode as CoreTeamWorkflowIntegrationMode;
+use codex_core::team_api::TeamWorkflowPublicLifecycle as CoreTeamWorkflowLifecycle;
+use codex_core::team_api::TeamWorkflowPublicLifecycleState as CoreTeamWorkflowLifecycleState;
 use codex_core::team_api::TeamWorkflowPublicMemoryProvider as CoreTeamWorkflowMemoryProvider;
 use codex_core::team_api::TeamWorkflowPublicMemoryProviderHealth as CoreTeamWorkflowMemoryProviderHealth;
 use codex_core::team_api::TeamWorkflowPublicMemoryProviderMode as CoreTeamWorkflowPublicMemoryProviderMode;
@@ -266,11 +273,10 @@ use codex_core::team_api::TeamWorkflowPublicPhase as CoreTeamWorkflowPhase;
 use codex_core::team_api::TeamWorkflowPublicResource as CoreTeamWorkflowResource;
 use codex_core::team_api::TeamWorkflowPublicResourceKind as CoreTeamWorkflowResourceKind;
 use codex_core::team_api::TeamWorkflowPublicResourceStatus as CoreTeamWorkflowResourceStatus;
+use codex_core::team_api::TeamWorkflowPublicRootAgent as CoreTeamWorkflowRootAgent;
 use codex_core::team_api::TeamWorkflowPublicSession as CoreTeamWorkflowSession;
 use codex_core::team_api::TeamWorkflowPublicTapeEntry as CoreTeamWorkflowTapeEntry;
 use codex_core::team_api::TeamWorkflowPublicTapeKind as CoreTeamWorkflowTapeKind;
-use codex_core::team_api::TeamWorkflowPublicTeam as CoreTeamWorkflowTeam;
-use codex_core::team_api::TeamWorkflowPublicTeamKind as CoreTeamWorkflowTeamKind;
 use codex_core::team_api::TeamWorkflowPublicWorktree as CoreTeamWorkflowWorktree;
 use codex_core::team_api::TeamWorkflowThreadVisibility;
 use codex_core::team_api::load_public_team_workflow_session;
@@ -745,6 +751,7 @@ impl CodexMessageProcessor {
             }
             ClientRequest::ThreadShellCommand { request_id, params } => {
                 self.thread_shell_command(to_connection_request_id(request_id), params)
+                    .await;
             }
             ClientRequest::TeamWorkflowSessionRead { request_id, params } => {
                 self.team_workflow_session_read(to_connection_request_id(request_id), params)
@@ -8698,6 +8705,9 @@ fn map_team_workflow_session(session: CoreTeamWorkflowSession) -> TeamWorkflowSe
         root_thread_id: session.root_thread_id.to_string(),
         root_team_id: session.root_team_id,
         root_role: session.root_role,
+        root_agent: map_team_workflow_root_agent(session.root_agent),
+        lifecycle: map_team_workflow_lifecycle(session.lifecycle),
+        handoff: map_team_workflow_handoff(session.handoff),
         current_phase: map_team_workflow_phase(session.current_phase),
         max_depth: session.max_depth,
         active_team_count: session.active_team_count,
@@ -8706,43 +8716,56 @@ fn map_team_workflow_session(session: CoreTeamWorkflowSession) -> TeamWorkflowSe
         memory_provider: map_team_workflow_memory_provider(session.memory_provider),
         global_governance_path: session.global_governance_path,
         team_state_index_path: session.team_state_index_path,
-        teams: session
-            .teams
-            .into_iter()
-            .map(map_team_workflow_team)
-            .collect(),
         updated_at: session.updated_at,
     }
 }
 
-fn map_team_workflow_team(team: CoreTeamWorkflowTeam) -> TeamWorkflowTeam {
-    TeamWorkflowTeam {
-        team_id: team.team_id,
-        thread_id: team.thread_id.to_string(),
-        parent_team_id: team.parent_team_id,
-        depth: team.depth,
-        kind: match team.kind {
-            CoreTeamWorkflowTeamKind::Root => TeamWorkflowTeamKind::Root,
-            CoreTeamWorkflowTeamKind::Child => TeamWorkflowTeamKind::Child,
-        },
-        role: team.role,
-        nickname: team.nickname,
-        current_phase: map_team_workflow_phase(team.current_phase),
-        blockers: team.blockers,
-        next_steps: team.next_steps,
-        active_child_team_ids: team.active_child_team_ids,
-        governance_doc_path: team.governance_doc_path,
-        global_governance_path: team.global_governance_path,
-        produced_artifacts: team.produced_artifacts,
-        worktree: team.worktree.map(map_team_workflow_worktree),
-        environment: map_team_workflow_environment(team.environment),
-        integration: team.integration.map(map_team_workflow_integration),
-        recent_tape: team
-            .recent_tape
-            .into_iter()
-            .map(map_team_workflow_tape_entry)
-            .collect(),
-        updated_at: team.updated_at,
+fn map_team_workflow_root_agent(agent: CoreTeamWorkflowRootAgent) -> TeamWorkflowRootAgent {
+    TeamWorkflowRootAgent {
+        agent_id: agent.agent_id,
+        thread_id: agent.thread_id.to_string(),
+        role: agent.role,
+        entrypoint: agent.entrypoint,
+        nested_agents_public: agent.nested_agents_public,
+    }
+}
+
+fn map_team_workflow_lifecycle(lifecycle: CoreTeamWorkflowLifecycle) -> TeamWorkflowLifecycle {
+    TeamWorkflowLifecycle {
+        state: map_team_workflow_lifecycle_state(lifecycle.state),
+        phase: map_team_workflow_phase(lifecycle.phase),
+        review_required: lifecycle.review_required,
+        blocked: lifecycle.blocked,
+        integration_ready: lifecycle.integration_ready,
+        trace_group_id: lifecycle.trace_group_id,
+        last_transition_at: lifecycle.last_transition_at,
+    }
+}
+
+fn map_team_workflow_handoff(handoff: CoreTeamWorkflowHandoff) -> TeamWorkflowHandoff {
+    TeamWorkflowHandoff {
+        state: map_team_workflow_lifecycle_state(handoff.state),
+        active_delegate_count: handoff.active_delegate_count,
+        blocked_delegate_count: handoff.blocked_delegate_count,
+        awaiting_review_count: handoff.awaiting_review_count,
+        integration_ready_count: handoff.integration_ready_count,
+        trace_group_id: handoff.trace_group_id,
+    }
+}
+
+fn map_team_workflow_lifecycle_state(
+    state: CoreTeamWorkflowLifecycleState,
+) -> TeamWorkflowLifecycleState {
+    match state {
+        CoreTeamWorkflowLifecycleState::Bootstrap => TeamWorkflowLifecycleState::Bootstrap,
+        CoreTeamWorkflowLifecycleState::Designing => TeamWorkflowLifecycleState::Designing,
+        CoreTeamWorkflowLifecycleState::Developing => TeamWorkflowLifecycleState::Developing,
+        CoreTeamWorkflowLifecycleState::Reviewing => TeamWorkflowLifecycleState::Reviewing,
+        CoreTeamWorkflowLifecycleState::Replanning => TeamWorkflowLifecycleState::Replanning,
+        CoreTeamWorkflowLifecycleState::Blocked => TeamWorkflowLifecycleState::Blocked,
+        CoreTeamWorkflowLifecycleState::IntegrationReady => {
+            TeamWorkflowLifecycleState::IntegrationReady
+        }
     }
 }
 
@@ -8891,10 +8914,6 @@ mod tests {
     use codex_core::team_api::TeamWorkflowPublicEnvironment;
     use codex_core::team_api::TeamWorkflowPublicPhase;
     use codex_core::team_api::TeamWorkflowPublicSession;
-    use codex_core::team_api::TeamWorkflowPublicTapeEntry;
-    use codex_core::team_api::TeamWorkflowPublicTapeKind;
-    use codex_core::team_api::TeamWorkflowPublicTeam;
-    use codex_core::team_api::TeamWorkflowPublicTeamKind;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::SubAgentSource;
     use pretty_assertions::assert_eq;
@@ -8993,6 +9012,30 @@ mod tests {
             root_thread_id: ThreadId::new(),
             root_team_id: "root-team".to_string(),
             root_role: "root-scheduler".to_string(),
+            root_agent: codex_core::team_api::TeamWorkflowPublicRootAgent {
+                agent_id: "root-scheduler".to_string(),
+                thread_id: ThreadId::new(),
+                role: "root-scheduler".to_string(),
+                entrypoint: "turn/start".to_string(),
+                nested_agents_public: false,
+            },
+            lifecycle: codex_core::team_api::TeamWorkflowPublicLifecycle {
+                state: codex_core::team_api::TeamWorkflowPublicLifecycleState::Blocked,
+                phase: TeamWorkflowPublicPhase::Review,
+                review_required: true,
+                blocked: true,
+                integration_ready: false,
+                trace_group_id: "trace-root".to_string(),
+                last_transition_at: "2026-03-17T00:00:00Z".to_string(),
+            },
+            handoff: codex_core::team_api::TeamWorkflowPublicHandoff {
+                state: codex_core::team_api::TeamWorkflowPublicLifecycleState::Blocked,
+                active_delegate_count: 1,
+                blocked_delegate_count: 1,
+                awaiting_review_count: 1,
+                integration_ready_count: 0,
+                trace_group_id: "trace-root".to_string(),
+            },
             current_phase: TeamWorkflowPublicPhase::Review,
             max_depth: 5,
             active_team_count: 2,
@@ -9003,64 +9046,20 @@ mod tests {
                 health: codex_core::team_api::TeamWorkflowPublicMemoryProviderHealth::Ready,
             },
             global_governance_path: PathBuf::from(".codex/AGENT.md"),
-            team_state_index_path: PathBuf::from(".codex/team-state/index.json"),
-            teams: vec![TeamWorkflowPublicTeam {
-                team_id: "child-team".to_string(),
-                thread_id: "team-d1-development-lead-12345678".to_string(),
-                parent_team_id: Some("root-team".to_string()),
-                depth: 1,
-                kind: TeamWorkflowPublicTeamKind::Child,
-                role: "development-lead".to_string(),
-                nickname: Some("Ada".to_string()),
-                current_phase: TeamWorkflowPublicPhase::Development,
-                blockers: vec!["waiting on review".to_string()],
-                next_steps: vec!["package handoff".to_string()],
-                active_child_team_ids: vec![],
-                governance_doc_path: PathBuf::from(".codex/team-state/child-team/AGENT_TEAM.md"),
-                global_governance_path: PathBuf::from(".codex/AGENT.md"),
-                produced_artifacts: vec!["artifacts/handoff.md".to_string()],
-                worktree: None,
-                environment: TeamWorkflowPublicEnvironment {
-                    managed_resources: vec![],
-                    stale_resources: vec![],
-                    cleanup_notes: vec!["remove sandbox".to_string()],
-                    last_cleanup_at: None,
-                },
-                integration: None,
-                recent_tape: vec![TeamWorkflowPublicTapeEntry {
-                    entry_id: "entry-1".to_string(),
-                    team_id: "child-team".to_string(),
-                    kind: TeamWorkflowPublicTapeKind::ArtifactHandoff,
-                    summary: "Artifact handoff recorded.".to_string(),
-                    counterpart_team_id: Some("root-team".to_string()),
-                    phase: Some(TeamWorkflowPublicPhase::Review),
-                    anchor: Some("delivery".to_string()),
-                    artifact_refs: vec![PathBuf::from("artifacts/handoff.md")],
-                    created_at: "2026-03-17T00:00:00Z".to_string(),
-                }],
-                updated_at: "2026-03-17T00:00:00Z".to_string(),
-            }],
+            team_state_index_path: PathBuf::from(".codex/team-ops/index.json"),
             updated_at: "2026-03-17T00:00:00Z".to_string(),
         });
 
         assert_eq!(session.current_phase, TeamWorkflowPhase::Review);
+        assert_eq!(session.root_agent.agent_id, "root-scheduler");
+        assert_eq!(session.lifecycle.state, TeamWorkflowLifecycleState::Blocked);
+        assert_eq!(session.handoff.awaiting_review_count, 1);
         assert_eq!(session.active_team_count, 2);
-        assert_eq!(session.teams.len(), 1);
+        assert_eq!(session.handoff.active_delegate_count, 1);
+        assert_eq!(session.handoff.blocked_delegate_count, 1);
         assert_eq!(
             session.memory_provider.mode,
             TeamWorkflowMemoryProviderMode::Local
-        );
-        assert_eq!(
-            session.teams[0].produced_artifacts,
-            vec!["artifacts/handoff.md"]
-        );
-        assert_eq!(
-            session.teams[0].recent_tape[0].kind,
-            TeamWorkflowTapeKind::ArtifactHandoff
-        );
-        assert_eq!(
-            session.teams[0].recent_tape[0].summary,
-            "Artifact handoff recorded."
         );
     }
 

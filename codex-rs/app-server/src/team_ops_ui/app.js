@@ -295,53 +295,47 @@ function renderOverview() {
 }
 
 function renderTeamGrid() {
-  if (!state.session?.teams?.length) {
+  if (!state.session) {
     elements.teamGrid.innerHTML = `<div class="empty-state">No visible teams.</div>`;
     return;
   }
 
-  elements.teamGrid.innerHTML = state.session.teams
-    .map((team) => {
-      const blocked = (team.blockers || []).length > 0;
-      const staleCount = (team.environment?.staleResources || []).length;
-      const classes = [
-        "team-card",
-        team.teamId === state.selectedTeamId ? "is-selected" : "",
-        blocked ? "is-blocked" : "",
-        staleCount > 0 ? "is-stale" : "",
-      ]
-        .filter(Boolean)
-        .join(" ");
-      return `
-        <article class="${classes}">
-          <header>
-            <div>
-              <h3>${escapeHtml(team.nickname || team.teamId)}</h3>
-              <p class="team-role">${escapeHtml(team.role)}</p>
-            </div>
-            <span class="tag">${escapeHtml(team.currentPhase)}</span>
-          </header>
-          <div class="tag-row">
-            <span class="tag">Depth ${escapeHtml(team.depth)}</span>
-            <span class="tag">${escapeHtml(team.kind)}</span>
-            <span class="tag">${escapeHtml(team.producedArtifacts.length)} artifacts</span>
-          </div>
-          <div class="team-meta">
-            <p>${blocked ? escapeHtml(team.blockers.join(" | ")) : "No active blockers."}</p>
-            <p>${team.nextSteps?.length ? escapeHtml(team.nextSteps.join(" | ")) : "No next steps recorded."}</p>
-            <p>${staleCount > 0 ? `${staleCount} stale resource(s) need cleanup.` : "No stale resources flagged."}</p>
-          </div>
-          <button class="ghost" data-team-id="${escapeHtml(team.teamId)}" type="button">Inspect Team</button>
-        </article>
-      `;
-    })
-    .join("");
+  const session = state.session;
+  const blocked = session.blockedTeamCount > 0;
+  const staleCount = session.staleResourceCount || 0;
+  const classes = [
+    "team-card",
+    "is-selected",
+    blocked ? "is-blocked" : "",
+    staleCount > 0 ? "is-stale" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  elements.teamGrid.innerHTML = `
+    <article class="${classes}">
+      <header>
+        <div>
+          <h3>${escapeHtml(session.rootAgent.agentId)}</h3>
+          <p class="team-role">${escapeHtml(session.rootRole)}</p>
+        </div>
+        <span class="tag">${escapeHtml(session.lifecycle.state)}</span>
+      </header>
+      <div class="tag-row">
+        <span class="tag">Phase ${escapeHtml(session.currentPhase)}</span>
+        <span class="tag">${escapeHtml(String(session.activeTeamCount))} active teams</span>
+        <span class="tag">${escapeHtml(String(session.handoff.awaitingReviewCount || 0))} awaiting review</span>
+      </div>
+      <div class="team-meta">
+        <p>${blocked ? `${escapeHtml(String(session.blockedTeamCount))} blocked team(s) need attention.` : "No active blockers recorded."}</p>
+        <p>${staleCount > 0 ? `${staleCount} stale resource(s) need cleanup.` : "No stale resources flagged."}</p>
+        <p>Detailed topology stays in the operator mirror index, not the public websocket payload.</p>
+      </div>
+      <button class="ghost" data-open-index="true" type="button">Open Operator Index</button>
+    </article>
+  `;
 
-  elements.teamGrid.querySelectorAll("[data-team-id]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.selectedTeamId = button.getAttribute("data-team-id");
-      renderSession();
-    });
+  elements.teamGrid.querySelector("[data-open-index]")?.addEventListener("click", () => {
+    viewFile(state.session.teamStateIndexPath, "Operator Index");
   });
 }
 
@@ -387,8 +381,8 @@ async function viewFile(path, label) {
 }
 
 function renderSelectedTeam() {
-  const team = state.session?.teams?.find((entry) => entry.teamId === state.selectedTeamId);
-  if (!team) {
+  const session = state.session;
+  if (!session) {
     elements.selectedTeamSummary.textContent = "Select a team to inspect details.";
     elements.governanceActions.innerHTML = "";
     elements.artifactActions.innerHTML = "";
@@ -398,11 +392,11 @@ function renderSelectedTeam() {
   }
 
   elements.selectedTeamSummary.textContent =
-    `${team.role} | phase ${team.currentPhase} | ${team.activeChildTeamIds.length} child team(s)`;
+    `${session.rootRole} | phase ${session.currentPhase} | ${session.activeTeamCount} active team(s)`;
 
   const governanceEntries = [
-    { label: "Open AGENT.md", path: state.session.globalGovernancePath },
-    { label: "Open AGENT_TEAM.md", path: team.governanceDocPath },
+    { label: "Open AGENT.md", path: session.globalGovernancePath },
+    { label: "Open Operator Index", path: session.teamStateIndexPath },
   ];
   elements.governanceActions.innerHTML = governanceEntries
     .map(
@@ -420,55 +414,26 @@ function renderSelectedTeam() {
     });
   });
 
-  const artifactEntries = collectArtifactEntries(team);
-  elements.artifactActions.innerHTML =
-    artifactEntries.length === 0
-      ? `<div class="empty-state">No persisted artifacts for this team yet.</div>`
-      : artifactEntries
-          .map(
-            (artifact, index) => `
-              <button
-                class="${artifact.readable ? "ghost" : "secondary"}"
-                data-artifact-index="${index}"
-                type="button"
-                ${artifact.readable ? "" : "disabled"}
-              >
-                ${escapeHtml(artifact.label)}
-              </button>
-            `,
-          )
-          .join("");
-  elements.artifactActions.querySelectorAll("[data-artifact-index]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const entry = artifactEntries[Number(button.getAttribute("data-artifact-index"))];
-      viewFile(entry.path, entry.label);
-    });
+  elements.artifactActions.innerHTML = `
+    <button class="ghost" data-open-index="true" type="button">Open Operator Index JSON</button>
+  `;
+  elements.artifactActions.querySelector("[data-open-index]")?.addEventListener("click", () => {
+    viewFile(session.teamStateIndexPath, "Operator Index");
   });
 
-  const blockers = team.blockers || [];
-  const staleResources = team.environment?.staleResources || [];
-  const cleanupNotes = team.environment?.cleanupNotes || [];
   const resourceRows = [];
-  if (blockers.length > 0) {
+  if (session.blockedTeamCount > 0) {
     resourceRows.push(
-      `<div class="empty-state"><strong>Workflow blockers</strong><br />${escapeHtml(blockers.join("\n"))}</div>`,
+      `<div class="empty-state"><strong>Workflow blockers</strong><br />${escapeHtml(
+        `${session.blockedTeamCount} team(s) are currently blocked.`,
+      )}</div>`,
     );
   }
-  if (staleResources.length > 0) {
+  if ((session.staleResourceCount || 0) > 0) {
     resourceRows.push(
-      `<ul class="resource-list">${staleResources
-        .map(
-          (resource) =>
-            `<li><strong>${escapeHtml(resource.resourceId)}</strong> | ${escapeHtml(resource.kind)} | ${escapeHtml(resource.status)}</li>`,
-        )
-        .join("")}</ul>`,
-    );
-  }
-  if (cleanupNotes.length > 0) {
-    resourceRows.push(
-      `<ul class="list-plain">${cleanupNotes
-        .map((note) => `<li>${escapeHtml(note)}</li>`)
-        .join("")}</ul>`,
+      `<div class="empty-state"><strong>Cleanup pressure</strong><br />${escapeHtml(
+        `${session.staleResourceCount} stale resource(s) are tracked in the operator mirror.`,
+      )}</div>`,
     );
   }
   if (resourceRows.length === 0) {
@@ -477,21 +442,15 @@ function renderSelectedTeam() {
   elements.resourceSummary.innerHTML = resourceRows.join("");
 
   elements.readingPath.innerHTML =
-    team.recentTape?.length > 0
-      ? team.recentTape
-          .map(
-            (entry) => `
-              <article class="timeline-entry">
-                <h4>${escapeHtml(entry.kind)} | ${escapeHtml(entry.createdAt)}</h4>
-                <p>${escapeHtml(entry.summary)}</p>
-                <p>${escapeHtml(entry.phase || "phase pending")}${
-                  entry.counterpartTeamId ? ` | counterpart ${escapeHtml(entry.counterpartTeamId)}` : ""
-                }</p>
-              </article>
-            `,
-          )
-          .join("")
-      : `<div class="empty-state">No reading path entries recorded for this team.</div>`;
+    `
+      <article class="timeline-entry">
+        <h4>${escapeHtml(session.lifecycle.state)} | ${escapeHtml(session.lifecycle.lastTransitionAt)}</h4>
+        <p>Trace group ${escapeHtml(session.lifecycle.traceGroupId)} is active on the root scheduler.</p>
+        <p>${escapeHtml(
+          `${session.handoff.activeDelegateCount || 0} delegate(s), ${session.handoff.awaitingReviewCount || 0} awaiting review, ${session.handoff.integrationReadyCount || 0} integration-ready.`,
+        )}</p>
+      </article>
+    `;
 }
 
 function summarizeThreadItem(item) {

@@ -1,15 +1,17 @@
 use super::GLOBAL_AGENT_DOC_FILENAME;
 use super::TEAM_AGENT_DOC_FILENAME;
+use super::TeamWorkflowPublicLifecycleState;
 use super::TeamWorkflowPublicMemoryProviderHealth;
 use super::TeamWorkflowPublicMemoryProviderMode;
-use super::TeamWorkflowPublicTapeKind;
 use super::TeamWorkflowThreadVisibility;
 use super::config::TeamWorkflowConfig;
 use super::config::load_workflow_from_workspace;
 use super::load_public_team_workflow_session;
+use super::record_team_compact_checkpoint;
 use super::runtime::maybe_initialize_for_thread;
 use super::runtime::prepare_team_message;
 use super::runtime::record_team_message_delivery;
+use super::runtime::record_team_resume;
 use super::state::TEAM_AUDIT_FILENAME;
 use super::state::TEAM_HANDOFF_FILENAME;
 use super::state::TEAM_INDEX_FILENAME;
@@ -25,6 +27,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
+use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
@@ -487,7 +490,7 @@ async fn public_team_visibility_hides_child_threads_but_keeps_root_public() {
 }
 
 #[tokio::test]
-async fn public_team_session_redacts_child_context_but_keeps_artifacts_and_status() {
+async fn public_team_session_exposes_root_only_lifecycle_summary() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     write_workflow(&temp_dir, "version: 1\n").await;
     let root_thread_id = ThreadId::new();
@@ -540,12 +543,6 @@ async fn public_team_session_redacts_child_context_but_keeps_artifacts_and_statu
         .expect("session exists");
     assert_eq!(session.root_thread_id, root_thread_id);
     assert_eq!(session.active_team_count, 2);
-    let child_team = session
-        .teams
-        .iter()
-        .find(|team| team.kind == super::TeamWorkflowPublicTeamKind::Child)
-        .expect("child team present in redacted session");
-    assert_ne!(child_team.thread_id, child_thread_id.to_string());
     assert_eq!(
         session.memory_provider.mode,
         TeamWorkflowPublicMemoryProviderMode::Local
@@ -554,24 +551,19 @@ async fn public_team_session_redacts_child_context_but_keeps_artifacts_and_statu
         session.memory_provider.health,
         TeamWorkflowPublicMemoryProviderHealth::Ready
     );
+    assert_eq!(session.root_agent.agent_id, "root-scheduler");
     assert_eq!(
-        child_team.produced_artifacts.len(),
-        prepared.artifact_refs.len()
+        session.lifecycle.state,
+        TeamWorkflowPublicLifecycleState::Blocked
     );
-    assert!(
-        child_team
-            .recent_tape
-            .iter()
-            .all(|entry| !entry.summary.contains("private implementation details")),
-        "public tape summaries must be redacted"
-    );
-    assert!(
-        child_team
-            .recent_tape
-            .iter()
-            .any(|entry| entry.kind == TeamWorkflowPublicTapeKind::Bootstrap),
-        "bootstrap tape should still be visible"
-    );
+    assert_eq!(session.handoff.trace_group_id, root_thread_id.to_string());
+    assert_eq!(session.handoff.active_delegate_count, 1);
+    assert_eq!(session.handoff.blocked_delegate_count, 1);
+    assert_eq!(session.handoff.awaiting_review_count, 1);
+    assert_eq!(session.handoff.integration_ready_count, 1);
+    let session_json = serde_json::to_string(&session).expect("serialize session");
+    assert!(!session_json.contains(&child_thread_id.to_string()));
+    assert!(!session_json.contains("private implementation details"));
 }
 
 #[tokio::test]
@@ -601,4 +593,305 @@ async fn configured_tape_provider_surfaces_degraded_status_without_blocking_runt
         session.memory_provider.health,
         TeamWorkflowPublicMemoryProviderHealth::Degraded
     );
+}
+
+#[tokio::test]
+async fn sibling_peer_messages_require_structured_a2a_and_persist_peer_shape() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    write_workflow(&temp_dir, "version: 1\n").await;
+    let root_thread_id = ThreadId::new();
+    let design_thread_id = ThreadId::new();
+    let development_thread_id = ThreadId::new();
+
+    maybe_initialize_for_thread(temp_dir.path(), root_thread_id, &SessionSource::Exec, None)
+        .await
+        .expect("initialize root team");
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        design_thread_id,
+        &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: root_thread_id,
+            depth: 1,
+            agent_nickname: Some("Ada".to_string()),
+            agent_role: Some("design-lead".to_string()),
+        }),
+        None,
+    )
+    .await
+    .expect("initialize design team");
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        development_thread_id,
+        &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: root_thread_id,
+            depth: 1,
+            agent_nickname: Some("Linus".to_string()),
+            agent_role: Some("development-lead".to_string()),
+        }),
+        None,
+    )
+    .await
+    .expect("initialize development team");
+
+    let raw_err = prepare_team_message(
+        temp_dir.path(),
+        design_thread_id,
+        development_thread_id,
+        vec![UserInput::Text {
+            text: "please align on the API".to_string(),
+            text_elements: Vec::new(),
+        }],
+    )
+    .await
+    .expect_err("raw same-level payload should be rejected");
+    assert!(raw_err.to_string().contains("A2A"));
+
+    let prepared = prepare_team_message(
+        temp_dir.path(),
+        design_thread_id,
+        development_thread_id,
+        vec![UserInput::Text {
+            text: "protocol: codex-a2a\nintent: align\nphase: design\nsummary: Align the response schema and keep the handoff bounded.\nartifact_refs:\n- docs/interface.md\nreply_needed: true".to_string(),
+            text_elements: Vec::new(),
+        }],
+    )
+    .await
+    .expect("prepare a2a payload");
+    let UserInput::Text { text, .. } = &prepared.items[0] else {
+        panic!("expected rendered a2a text");
+    };
+    assert!(text.contains("protocol: codex-a2a"));
+    record_team_message_delivery(
+        temp_dir.path(),
+        design_thread_id,
+        development_thread_id,
+        &prepared,
+    )
+    .await
+    .expect("record a2a delivery");
+
+    let tape = std::fs::read_to_string(
+        temp_dir
+            .path()
+            .join(".codex")
+            .join("team-state")
+            .join(design_thread_id.to_string())
+            .join(TEAM_TAPE_FILENAME),
+    )
+    .expect("read tape");
+    let last_entry: Value = serde_json::from_str(
+        tape.lines()
+            .filter(|line| !line.trim().is_empty())
+            .next_back()
+            .expect("last tape line"),
+    )
+    .expect("parse tape entry");
+    assert_eq!(last_entry["kind"], "peer_sync");
+    assert_eq!(last_entry["peer_message"]["protocol"], "codex-a2a");
+    assert_eq!(last_entry["peer_message"]["intent"], "align");
+}
+
+#[tokio::test]
+async fn vertical_a2a_payload_is_rejected_with_artifact_guidance() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    write_workflow(&temp_dir, "version: 1\n").await;
+    let root_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+
+    maybe_initialize_for_thread(temp_dir.path(), root_thread_id, &SessionSource::Exec, None)
+        .await
+        .expect("initialize root team");
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        child_thread_id,
+        &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: root_thread_id,
+            depth: 1,
+            agent_nickname: Some("Ada".to_string()),
+            agent_role: Some("design-lead".to_string()),
+        }),
+        None,
+    )
+    .await
+    .expect("initialize child team");
+
+    let err = prepare_team_message(
+        temp_dir.path(),
+        child_thread_id,
+        root_thread_id,
+        vec![UserInput::Text {
+            text: "protocol: codex-a2a\nintent: align\nsummary: send context upward".to_string(),
+            text_elements: Vec::new(),
+        }],
+    )
+    .await
+    .expect_err("vertical a2a should be rejected");
+    assert!(err.to_string().contains("vertical artifact handoff"));
+}
+
+#[tokio::test]
+async fn vertical_handoff_allows_json_payload_without_a2a_protocol() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    write_workflow(&temp_dir, "version: 1\n").await;
+    let root_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+
+    maybe_initialize_for_thread(temp_dir.path(), root_thread_id, &SessionSource::Exec, None)
+        .await
+        .expect("initialize root team");
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        child_thread_id,
+        &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: root_thread_id,
+            depth: 1,
+            agent_nickname: Some("Ada".to_string()),
+            agent_role: Some("design-lead".to_string()),
+        }),
+        None,
+    )
+    .await
+    .expect("initialize child team");
+
+    let prepared = prepare_team_message(
+        temp_dir.path(),
+        child_thread_id,
+        root_thread_id,
+        vec![UserInput::Text {
+            text: "{\"summary\":\"user intent: fix auth timeout\",\"details\":{\"intent\":\"fix auth timeout\"}}".to_string(),
+            text_elements: Vec::new(),
+        }],
+    )
+    .await
+    .expect("plain json handoff should remain valid");
+
+    assert!(prepared.integration_handoff.is_some());
+    assert!(prepared.a2a_envelope.is_none());
+    assert!(
+        !prepared.summary.contains(&child_thread_id.to_string()),
+        "vertical handoff summary should remain sanitized"
+    );
+}
+
+#[tokio::test]
+async fn development_handoff_requires_review_evidence_before_integration_ready() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(&temp_dir);
+    write_workflow(&temp_dir, "version: 1\n").await;
+    let root_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+
+    maybe_initialize_for_thread(temp_dir.path(), root_thread_id, &SessionSource::Exec, None)
+        .await
+        .expect("initialize root team");
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        child_thread_id,
+        &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: root_thread_id,
+            depth: 1,
+            agent_nickname: Some("Linus".to_string()),
+            agent_role: Some("development-lead".to_string()),
+        }),
+        None,
+    )
+    .await
+    .expect("initialize child team");
+
+    let child_bundle = load_team_state_bundle(temp_dir.path(), &child_thread_id.to_string())
+        .await
+        .expect("load child bundle")
+        .expect("child bundle exists");
+    let child_worktree = child_bundle
+        .record
+        .worktree
+        .expect("child worktree assigned");
+    std::fs::write(
+        child_worktree.checkout_path.join("module.rs"),
+        "pub fn ready() {}\n",
+    )
+    .expect("write module");
+    run_git(&child_worktree.checkout_path, &["add", "module.rs"]);
+    run_git(
+        &child_worktree.checkout_path,
+        &["commit", "-m", "child change"],
+    );
+
+    let prepared = prepare_team_message(
+        temp_dir.path(),
+        child_thread_id,
+        root_thread_id,
+        vec![UserInput::Text {
+            text: "ready for parent review".to_string(),
+            text_elements: Vec::new(),
+        }],
+    )
+    .await
+    .expect("prepare handoff");
+    let err =
+        record_team_message_delivery(temp_dir.path(), child_thread_id, root_thread_id, &prepared)
+            .await
+            .expect_err("review gate should reject development finalize");
+    assert!(err.to_string().contains("reviewRequired"));
+
+    let updated_bundle = load_team_state_bundle(temp_dir.path(), &child_thread_id.to_string())
+        .await
+        .expect("reload child bundle")
+        .expect("child bundle exists");
+    assert_eq!(updated_bundle.status.current_phase, TeamPhase::Review);
+    assert!(
+        updated_bundle
+            .status
+            .blockers
+            .iter()
+            .any(|entry| entry.contains("Review evidence"))
+    );
+}
+
+#[tokio::test]
+async fn compact_checkpoint_and_resume_enforce_artifact_first_recovery() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    write_workflow(&temp_dir, "version: 1\n").await;
+    let root_thread_id = ThreadId::new();
+
+    maybe_initialize_for_thread(temp_dir.path(), root_thread_id, &SessionSource::Exec, None)
+        .await
+        .expect("initialize root team");
+
+    let mut bundle = load_team_state_bundle(temp_dir.path(), &root_thread_id.to_string())
+        .await
+        .expect("load bundle")
+        .expect("bundle exists");
+    bundle.status.blockers = vec!["checkpoint blocker".to_string()];
+    bundle.status.next_steps = vec!["persist compact marker".to_string()];
+    write_team_state_bundle(&bundle)
+        .await
+        .expect("write bundle");
+
+    record_team_compact_checkpoint(temp_dir.path(), &root_thread_id.to_string())
+        .await
+        .expect("record compact checkpoint");
+
+    let compacted_bundle = load_team_state_bundle(temp_dir.path(), &root_thread_id.to_string())
+        .await
+        .expect("reload compacted bundle")
+        .expect("bundle exists");
+    assert!(
+        compacted_bundle
+            .recovery
+            .last_compact_checkpoint_at
+            .is_some()
+    );
+    assert_eq!(
+        compacted_bundle.recovery.blockers,
+        vec!["checkpoint blocker"]
+    );
+
+    tokio::fs::remove_file(&compacted_bundle.paths.status_path)
+        .await
+        .expect("remove status");
+    let resume_err = record_team_resume(temp_dir.path(), &root_thread_id.to_string())
+        .await
+        .expect_err("resume should require persisted artifacts");
+    assert!(resume_err.to_string().contains("resumeFromArtifacts"));
 }

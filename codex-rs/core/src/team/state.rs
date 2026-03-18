@@ -289,6 +289,37 @@ pub(crate) enum TeamTapeKind {
     IntegrationReady,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TeamA2aRelationship {
+    SameTeam,
+    Sibling,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TeamA2aIntent {
+    Align,
+    Request,
+    Answer,
+    Blocker,
+    HandoffReady,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TeamA2aEnvelope {
+    pub protocol: String,
+    pub version: u32,
+    pub sender_public_id: String,
+    pub recipient_public_id: String,
+    pub relationship: TeamA2aRelationship,
+    pub phase: TeamPhase,
+    pub intent: TeamA2aIntent,
+    pub summary: String,
+    pub artifact_refs: Vec<PathBuf>,
+    pub reply_needed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TeamTapeEntry {
     pub entry_id: String,
@@ -299,6 +330,8 @@ pub(crate) struct TeamTapeEntry {
     pub phase: Option<TeamPhase>,
     pub anchor: Option<String>,
     pub artifact_refs: Vec<PathBuf>,
+    #[serde(default)]
+    pub peer_message: Option<TeamA2aEnvelope>,
     pub created_at: String,
 }
 
@@ -480,6 +513,13 @@ pub(crate) async fn persist_team_state(
     status.audit_path = paths.audit_path.clone();
     status.tape_path = paths.tape_path.clone();
     status.current_phase = status.cycle.phase.clone();
+    seed_local_role_owner(
+        &mut status.cycle,
+        &record.team_id,
+        record.thread_id,
+        &record.role,
+        &now,
+    );
     status.updated_at = now.clone();
     write_json_pretty(&paths.status_path, &status).await?;
 
@@ -675,6 +715,7 @@ pub(crate) async fn append_team_tape_entry(
     counterpart_team_id: Option<String>,
     artifact_refs: Vec<PathBuf>,
     anchor: Option<String>,
+    peer_message: Option<TeamA2aEnvelope>,
 ) -> io::Result<TeamTapeEntry> {
     let Some(bundle) = load_team_state_bundle(workspace_root, team_id).await? else {
         return Err(io::Error::new(
@@ -697,6 +738,7 @@ pub(crate) async fn append_team_tape_entry(
             &bundle.record.workspace_root,
             "redacted-artifact",
         ),
+        peer_message,
         created_at: Utc::now().to_rfc3339(),
     };
     let line = serde_json::to_string(&entry).map_err(io::Error::other)?;
@@ -891,6 +933,34 @@ fn default_cycle_snapshot(required_roles: &[IterationRole], now: &str) -> TeamCy
             .collect(),
         replan_reason: None,
         last_transition_at: now.to_string(),
+    }
+}
+
+fn seed_local_role_owner(
+    cycle: &mut TeamCycleSnapshot,
+    team_id: &str,
+    thread_id: ThreadId,
+    owner_role: &str,
+    now: &str,
+) {
+    let Some(iteration_role) = infer_iteration_role(owner_role) else {
+        return;
+    };
+    if let Some(assignment) = cycle
+        .roles
+        .iter_mut()
+        .find(|entry| entry.role == iteration_role)
+        && assignment.owner_team_id.is_none()
+    {
+        assignment.owner_team_id = Some(team_id.to_string());
+        assignment.owner_thread_id = Some(thread_id);
+        assignment.owner_role = Some(owner_role.to_string());
+        if matches!(assignment.state, TeamRoleState::Pending) {
+            assignment.state = TeamRoleState::Active;
+            cycle.phase = phase_for_iteration_role(iteration_role);
+            cycle.last_transition_at = now.to_string();
+        }
+        assignment.updated_at = now.to_string();
     }
 }
 

@@ -14,23 +14,33 @@ This procedure validates packaged builds that include team workflow governance, 
 2. Open a root scheduler session against a workspace that has team workflow enabled.
 3. Trigger one delegation round so a child team is created and produces a vertical handoff.
 4. Read `teamWorkflow/sessionRead` for the root thread and confirm:
-   - nested teams use public-safe identifiers instead of real child thread ids
-   - governance and artifact paths point at `.codex/team-ops/...`
+   - `rootAgent.agentId` is `root-scheduler` and nested public agents remain disabled
+   - `lifecycle` and `handoff` reflect the current delegated/review state using the root trace group
+   - child-team topology is not exposed; only aggregate delegated-state counts are returned
+   - governance and operator mirror paths point at `.codex/team-ops/...`
    - the memory provider reports the expected mode and health
-5. Confirm `thread/list` and `thread/loaded/list` do not surface hidden child threads.
-6. Connect a non-experimental client and verify it does not receive `teamWorkflow/sessionUpdated` notifications.
-7. Open `/team-ops` from loopback and confirm:
+5. Trigger a same-level coordination event and confirm:
+   - raw sibling text passthrough is rejected
+   - a valid `codex-a2a` envelope is accepted and persisted as a peer-sync checkpoint
+   - the A2A channel is rejected across parent/child boundaries
+6. Confirm `thread/list` and `thread/loaded/list` do not surface hidden child threads.
+7. Connect a non-experimental client and verify it does not receive `teamWorkflow/sessionUpdated` notifications.
+8. Open `/team-ops` from loopback and confirm:
    - the UI loads
    - the UI reads only root scheduler state
    - governance docs and mirrored artifacts can be opened from `.codex/team-ops/...`
-8. Attempt to open `/team-ops` from a non-loopback context and confirm it is withheld unless `CODEX_TEAM_OPS_UI_ALLOW_REMOTE` is set.
-9. Review `.codex/team-governance/prompts/` and `.codex/skills/team-*` to confirm governance assets were generated.
-10. Shut down the workflow and confirm stale-resource indicators are surfaced when managed worktrees remain.
+9. Attempt to compact an active team workflow and confirm the recovery checkpoint updates before compact succeeds.
+10. If Tape mode is configured, inspect the outbound payload and confirm it excludes raw workspace roots and hidden child ids.
+11. Review `.codex/team-governance/prompts/` and `.codex/skills/team-*` to confirm governance assets were generated.
+12. Shut down the workflow and confirm stale-resource indicators are surfaced when managed worktrees remain.
 
 ## Expected Result
 
 - Root scheduler remains the only public-facing agent.
+- Root-agent compatibility fields accurately reflect lifecycle and handoff state.
+- Same-level A2A routing is bounded and vertical misuse is rejected.
 - Vertical handoffs persist sanitized artifacts only.
+- Compact/resume and provider-export policy checks are enforced by runtime.
 - Public status surfaces fail closed.
 - Tape remains optional and configuration-gated.
 - Team Ops UI is restricted to the intended operator surface.
@@ -52,8 +62,8 @@ This procedure validates packaged builds that include team workflow governance, 
 - `initialize` and `thread/start` succeeded against the packaged websocket server on a clean workspace with `.codex/team-workflow.yaml`.
 - A non-experimental connection was rejected for `teamWorkflow/sessionRead` with `teamWorkflow/sessionRead requires experimentalApi capability`.
 - The packaged `teamWorkflow/sessionRead` payload matched the current hardening requirements:
-  - it returned public-safe root identifiers (`root-scheduler`) instead of raw hidden team ids
-  - governance and artifact paths pointed at `.codex\team-ops\...`
+  - it returned the public root identifier (`root-scheduler`) without nested child-team payloads
+  - governance and operator mirror paths pointed at `.codex\team-ops\...`
   - `memoryProvider` reported `{ mode: "local", health: "ready" }`
 - `thread/loaded/list` exposed only the root scheduler thread for the packaged bootstrap session.
 - The packaged runtime created `.codex\team-ops\index.json` and mirrored `AGENT.md`, `AGENT_TEAM.md`, `status.json`, `handoff.json`, and `team-tape.jsonl` under `.codex\team-ops\teams\root-scheduler\`.

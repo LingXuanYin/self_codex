@@ -35,6 +35,23 @@ The runtime uses different rules for horizontal and vertical communication:
 - parent and child teams cannot exchange raw working context
 - cross-level communication is limited to persisted artifacts, files, and structured status manifests
 
+Same-level A2A coordination is now enforced as a bounded envelope instead of raw `send_input`
+passthrough. The accepted envelope is a single text payload shaped like:
+
+```text
+protocol: codex-a2a
+intent: align|request|answer|blocker|handoff_ready
+phase: design|development|review|replan
+summary: bounded summary of the request or blocker
+artifact_refs:
+- relative/path/to/artifact.md
+reply_needed: true|false
+```
+
+Raw same-level text passthrough is rejected. Attempts to use the A2A channel across
+parent/child boundaries are also rejected and redirected to the vertical artifact handoff
+contract.
+
 This keeps recovery, accountability, and compact-safe continuation grounded in persisted artifacts instead of hidden transcript state.
 
 ## Governance documents
@@ -85,14 +102,36 @@ The app-server exposes team workflows through a root-scheduler-only model:
 - only the root scheduler is public-facing
 - child-team threads are hidden from `thread/list`, `thread/loaded/list`, and `thread/read`
 - public status notifications suppress hidden child-team thread activity
-- external clients receive redacted nested-team summaries, artifacts, and review state through the team workflow session API
+- external clients receive only root-agent lifecycle and aggregated handoff state through the team workflow session API
 
 Current team workflow session APIs are experimental and require `initialize.params.capabilities.experimentalApi = true`:
 
 - `teamWorkflow/sessionRead`
 - `teamWorkflow/sessionUpdated`
 
+The public session now carries an explicit OpenAI Agents-style compatibility layer over the
+existing root scheduler runtime:
+
+- `rootAgent`: the single public agent identity and entrypoint for the workflow
+- `lifecycle`: the root-agent lifecycle state, phase, review gate, blocked state, and trace group
+- `handoff`: the current delegated/handoff view as aggregate counts, not child identifiers
+- `teamStateIndexPath`: the operator mirror index path used by the loopback Team Ops UI
+
+Nested child teams remain private. Their progress is surfaced only through root-agent lifecycle,
+aggregated delegated-state counts, and the operator mirror files under `.codex/team-ops/`.
+
 External clients should continue to send user instructions through the root scheduler thread with the normal `turn/start` flow.
+
+## Runtime enforcement
+
+The workflow file no longer relies on prompt discipline alone for core governance:
+
+- `reviewRequired` blocks integration-ready closure until review evidence exists
+- `singleWriter` blocks finalize/handoff when a non-owner attempts to close the cycle
+- `atomicWorkflows` requires persisted status/handoff/governance checkpoints at finalize boundaries
+- `persistBeforeCompact` writes recovery checkpoints before compact continues
+- `resumeFromArtifacts` requires persisted status/handoff/governance artifacts before leader resume
+- external memory providers receive sanitized team-memory exports only
 
 ## Web UI
 
@@ -103,8 +142,8 @@ When `codex app-server` is running over websocket transport, it now also serves 
 The UI connects to the same websocket app-server endpoint and lets an operator:
 
 - attach to a root scheduler thread
-- inspect team topology and current workflow phase
-- review governance documents and persisted artifacts
+- inspect root lifecycle, delegated-state counts, and current workflow phase
+- review governance documents and open the operator mirror index for detailed topology
 - inspect cleanup pressure and blockers
 - send instructions only to the root scheduler
 

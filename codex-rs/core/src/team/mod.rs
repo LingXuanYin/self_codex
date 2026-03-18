@@ -6,8 +6,11 @@ mod runtime;
 mod state;
 
 pub use api::TeamWorkflowPublicEnvironment;
+pub use api::TeamWorkflowPublicHandoff;
 pub use api::TeamWorkflowPublicIntegration;
 pub use api::TeamWorkflowPublicIntegrationMode;
+pub use api::TeamWorkflowPublicLifecycle;
+pub use api::TeamWorkflowPublicLifecycleState;
 #[allow(unused_imports)]
 pub use api::TeamWorkflowPublicMemoryProvider;
 #[allow(unused_imports)]
@@ -18,6 +21,7 @@ pub use api::TeamWorkflowPublicPhase;
 pub use api::TeamWorkflowPublicResource;
 pub use api::TeamWorkflowPublicResourceKind;
 pub use api::TeamWorkflowPublicResourceStatus;
+pub use api::TeamWorkflowPublicRootAgent;
 pub use api::TeamWorkflowPublicSession;
 pub use api::TeamWorkflowPublicTapeEntry;
 pub use api::TeamWorkflowPublicTapeKind;
@@ -39,6 +43,7 @@ pub(crate) use runtime::maybe_initialize_for_thread;
 pub(crate) use runtime::prepare_child_team_spawn;
 pub(crate) use runtime::prepare_team_message;
 pub(crate) use runtime::record_child_team_spawn;
+pub(crate) use runtime::record_team_compact_checkpoint;
 pub(crate) use runtime::record_team_message_delivery;
 pub(crate) use runtime::record_team_resume;
 

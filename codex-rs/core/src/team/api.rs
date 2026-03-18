@@ -1,5 +1,5 @@
 use super::config::{
-    TEAM_DIRNAME, TEAM_STATE_DIRNAME, TeamMemoryProviderMode, resolve_team_home_root,
+    IterationRole, TEAM_DIRNAME, TEAM_STATE_DIRNAME, TeamMemoryProviderMode, resolve_team_home_root,
 };
 use super::memory::TeamMemoryProviderHealth;
 use super::memory::TeamMemoryProviderStatus;
@@ -161,6 +161,48 @@ pub struct TeamWorkflowPublicTapeEntry {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamWorkflowPublicLifecycleState {
+    Bootstrap,
+    Designing,
+    Developing,
+    Reviewing,
+    Replanning,
+    Blocked,
+    IntegrationReady,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamWorkflowPublicRootAgent {
+    pub agent_id: String,
+    pub thread_id: ThreadId,
+    pub role: String,
+    pub entrypoint: String,
+    pub nested_agents_public: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamWorkflowPublicLifecycle {
+    pub state: TeamWorkflowPublicLifecycleState,
+    pub phase: TeamWorkflowPublicPhase,
+    pub review_required: bool,
+    pub blocked: bool,
+    pub integration_ready: bool,
+    pub trace_group_id: String,
+    pub last_transition_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamWorkflowPublicHandoff {
+    pub state: TeamWorkflowPublicLifecycleState,
+    pub active_delegate_count: usize,
+    pub blocked_delegate_count: usize,
+    pub awaiting_review_count: usize,
+    pub integration_ready_count: usize,
+    pub trace_group_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamWorkflowPublicTeam {
     pub team_id: String,
@@ -189,6 +231,9 @@ pub struct TeamWorkflowPublicSession {
     pub root_thread_id: ThreadId,
     pub root_team_id: String,
     pub root_role: String,
+    pub root_agent: TeamWorkflowPublicRootAgent,
+    pub lifecycle: TeamWorkflowPublicLifecycle,
+    pub handoff: TeamWorkflowPublicHandoff,
     pub current_phase: TeamWorkflowPublicPhase,
     pub max_depth: i32,
     pub active_team_count: usize,
@@ -197,7 +242,6 @@ pub struct TeamWorkflowPublicSession {
     pub memory_provider: TeamWorkflowPublicMemoryProvider,
     pub global_governance_path: PathBuf,
     pub team_state_index_path: PathBuf,
-    pub teams: Vec<TeamWorkflowPublicTeam>,
     pub updated_at: String,
 }
 
@@ -233,7 +277,7 @@ pub async fn load_public_team_workflow_session(
         return Ok(None);
     };
 
-    let mut teams = Vec::new();
+    let mut bundles = Vec::new();
     let mut pending = vec![root_bundle.record.team_id.clone()];
     let mut visited = HashSet::new();
     while let Some(team_id) = pending.pop() {
@@ -244,39 +288,95 @@ pub async fn load_public_team_workflow_session(
             continue;
         };
         pending.extend(bundle.record.child_team_ids.iter().rev().cloned());
-        match public_team_from_bundle(&bundle, recent_tape_limit).await {
-            Ok(team) => teams.push(team),
-            Err(err) => {
-                warn!(team_id = %bundle.record.team_id, "failed to shape public team workflow state: {err}");
-            }
-        }
+        bundles.push(bundle);
     }
-    teams.sort_by(|left, right| {
-        left.depth
-            .cmp(&right.depth)
-            .then_with(|| left.team_id.cmp(&right.team_id))
-    });
 
-    let blocked_team_count = teams
+    let workflow = load_workflow_from_workspace(&root_bundle.record.workspace_root)
+        .await?
+        .unwrap_or_else(TeamWorkflowConfig::default);
+    let blocked_team_count = bundles
         .iter()
-        .filter(|team| !team.blockers.is_empty())
+        .filter(|bundle| !bundle.status.blockers.is_empty())
         .count();
-    let stale_resource_count = teams
+    let active_delegate_count = bundles
         .iter()
-        .map(|team| team.environment.stale_resources.len())
+        .filter(|bundle| bundle.record.kind == TeamKind::Child)
+        .count();
+    let blocked_delegate_count = bundles
+        .iter()
+        .filter(|bundle| {
+            bundle.record.kind == TeamKind::Child && !bundle.status.blockers.is_empty()
+        })
+        .count();
+    let awaiting_review_count = bundles
+        .iter()
+        .filter(|team| {
+            team.record.kind == TeamKind::Child
+                && matches!(team.status.current_phase, TeamPhase::Review)
+        })
+        .count();
+    let integration_ready_count = bundles
+        .iter()
+        .filter(|team| {
+            team.record.kind == TeamKind::Child
+                && team
+                    .handoff
+                    .integration
+                    .as_ref()
+                    .is_some_and(|integration| integration.review_ready)
+        })
+        .count();
+    let stale_resource_count = bundles
+        .iter()
+        .map(|bundle| bundle.status.environment.stale_resources.len())
         .sum();
+    let root_team_id = public_team_ref(
+        &root_bundle.record.team_id,
+        &root_bundle.record.role,
+        root_bundle.record.depth,
+        root_bundle.record.kind.clone(),
+    );
+    let trace_group_id = root_bundle.record.thread_id.to_string();
+    let lifecycle_state = derive_lifecycle_state(
+        &root_bundle,
+        blocked_team_count > 0,
+        integration_ready_count > 0,
+    );
     Ok(Some(TeamWorkflowPublicSession {
         root_thread_id: root_bundle.record.thread_id,
-        root_team_id: public_team_ref(
-            &root_bundle.record.team_id,
-            &root_bundle.record.role,
-            root_bundle.record.depth,
-            root_bundle.record.kind.clone(),
-        ),
+        root_team_id: root_team_id.clone(),
         root_role: root_bundle.record.role.clone(),
+        root_agent: TeamWorkflowPublicRootAgent {
+            agent_id: root_team_id.clone(),
+            thread_id: root_bundle.record.thread_id,
+            role: root_bundle.record.role.clone(),
+            entrypoint: "turn/start".to_string(),
+            nested_agents_public: false,
+        },
+        lifecycle: TeamWorkflowPublicLifecycle {
+            state: lifecycle_state,
+            phase: map_phase(&root_bundle.status.current_phase),
+            review_required: workflow.workflow_loop.review_required
+                && root_bundle
+                    .status
+                    .required_roles
+                    .contains(&IterationRole::Review),
+            blocked: blocked_team_count > 0,
+            integration_ready: integration_ready_count > 0,
+            trace_group_id: trace_group_id.clone(),
+            last_transition_at: root_bundle.status.cycle.last_transition_at.clone(),
+        },
+        handoff: TeamWorkflowPublicHandoff {
+            state: lifecycle_state,
+            active_delegate_count,
+            blocked_delegate_count,
+            awaiting_review_count,
+            integration_ready_count,
+            trace_group_id,
+        },
         current_phase: map_phase(&root_bundle.status.current_phase),
         max_depth: root_bundle.record.max_depth,
-        active_team_count: teams.len(),
+        active_team_count: bundles.len(),
         blocked_team_count,
         stale_resource_count,
         memory_provider: map_memory_provider(&root_bundle.status.memory_provider),
@@ -287,7 +387,6 @@ pub async fn load_public_team_workflow_session(
         team_state_index_path: PathBuf::from(".codex")
             .join(TEAM_OPS_DIRNAME)
             .join("index.json"),
-        teams,
         updated_at: root_bundle.status.updated_at.clone(),
     }))
 }
@@ -451,6 +550,26 @@ fn redact_tape_summary(kind: TeamTapeKind) -> String {
         TeamTapeKind::ArtifactHandoff => "Artifact handoff recorded.".to_string(),
         TeamTapeKind::Resume => "Leader resumed from persisted artifacts.".to_string(),
         TeamTapeKind::IntegrationReady => "Integration-ready handoff recorded.".to_string(),
+    }
+}
+
+fn derive_lifecycle_state(
+    bundle: &super::state::TeamStateBundle,
+    blocked: bool,
+    integration_ready: bool,
+) -> TeamWorkflowPublicLifecycleState {
+    if blocked {
+        return TeamWorkflowPublicLifecycleState::Blocked;
+    }
+    if integration_ready {
+        return TeamWorkflowPublicLifecycleState::IntegrationReady;
+    }
+    match bundle.status.current_phase {
+        TeamPhase::Bootstrap => TeamWorkflowPublicLifecycleState::Bootstrap,
+        TeamPhase::Design => TeamWorkflowPublicLifecycleState::Designing,
+        TeamPhase::Development => TeamWorkflowPublicLifecycleState::Developing,
+        TeamPhase::Review => TeamWorkflowPublicLifecycleState::Reviewing,
+        TeamPhase::Replan => TeamWorkflowPublicLifecycleState::Replanning,
     }
 }
 

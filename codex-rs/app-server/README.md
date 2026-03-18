@@ -126,7 +126,7 @@ Example with notification opt-out:
 
 Team workflow extensions:
 
-- `teamWorkflow/sessionRead` returns the public team-workflow session for a root scheduler thread, including topology, redacted tape entries, artifacts, governance document paths, worktree state, and environment cleanup status.
+- `teamWorkflow/sessionRead` returns the public team-workflow session for a root scheduler thread, including the root-agent identity, lifecycle state, aggregated delegated-state counts, governance document paths, and operator mirror index path.
 - `teamWorkflow/sessionUpdated` notifies subscribed root-scheduler clients whenever persisted team-workflow state changes.
 
 Hidden child-team threads stay private on the public app-server surface. They are suppressed from thread-listing and thread-status APIs, and external clients should keep sending user instructions through the root scheduler thread with the normal `turn/start` flow.

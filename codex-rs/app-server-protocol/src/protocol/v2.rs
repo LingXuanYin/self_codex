@@ -3139,12 +3139,61 @@ pub enum TeamWorkflowMemoryProviderHealth {
     Degraded,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum TeamWorkflowLifecycleState {
+    Bootstrap,
+    Designing,
+    Developing,
+    Reviewing,
+    Replanning,
+    Blocked,
+    IntegrationReady,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct TeamWorkflowMemoryProvider {
     pub mode: TeamWorkflowMemoryProviderMode,
     pub health: TeamWorkflowMemoryProviderHealth,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowRootAgent {
+    pub agent_id: String,
+    pub thread_id: String,
+    pub role: String,
+    pub entrypoint: String,
+    pub nested_agents_public: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowLifecycle {
+    pub state: TeamWorkflowLifecycleState,
+    pub phase: TeamWorkflowPhase,
+    pub review_required: bool,
+    pub blocked: bool,
+    pub integration_ready: bool,
+    pub trace_group_id: String,
+    pub last_transition_at: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowHandoff {
+    pub state: TeamWorkflowLifecycleState,
+    pub active_delegate_count: usize,
+    pub blocked_delegate_count: usize,
+    pub awaiting_review_count: usize,
+    pub integration_ready_count: usize,
+    pub trace_group_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -3248,6 +3297,9 @@ pub struct TeamWorkflowSession {
     pub root_thread_id: String,
     pub root_team_id: String,
     pub root_role: String,
+    pub root_agent: TeamWorkflowRootAgent,
+    pub lifecycle: TeamWorkflowLifecycle,
+    pub handoff: TeamWorkflowHandoff,
     pub current_phase: TeamWorkflowPhase,
     pub max_depth: i32,
     pub active_team_count: usize,
@@ -3256,7 +3308,6 @@ pub struct TeamWorkflowSession {
     pub memory_provider: TeamWorkflowMemoryProvider,
     pub global_governance_path: PathBuf,
     pub team_state_index_path: PathBuf,
-    pub teams: Vec<TeamWorkflowTeam>,
     pub updated_at: String,
 }
 

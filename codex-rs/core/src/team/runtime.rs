@@ -8,11 +8,12 @@ use super::redaction::{
     sanitize_workspace_path, vertical_receiver_label,
 };
 use super::state::{
-    TeamAuditEntry, TeamAuditKind, TeamEnvironmentState, TeamIntegrationHandoff,
-    TeamIntegrationMode, TeamKind, TeamManagedResource, TeamManagedResourceKind,
-    TeamManagedResourceStatus, TeamPhase, TeamStateBundle, TeamStatePaths, TeamStateRecord,
-    TeamStateWriteRequest, TeamTapeEntry, TeamTapeKind, TeamWorktreeState, append_team_tape_entry,
-    apply_role_assignment, indicates_replan, load_team_state_bundle, load_team_worktree,
+    TeamA2aEnvelope, TeamA2aIntent, TeamA2aRelationship, TeamAuditEntry, TeamAuditKind,
+    TeamEnvironmentState, TeamIntegrationHandoff, TeamIntegrationMode, TeamKind,
+    TeamManagedResource, TeamManagedResourceKind, TeamManagedResourceStatus, TeamPhase,
+    TeamStateBundle, TeamStatePaths, TeamStateRecord, TeamStateWriteRequest, TeamTapeEntry,
+    TeamTapeKind, TeamWorktreeState, append_team_tape_entry, apply_role_assignment,
+    indicates_replan, infer_iteration_role, load_team_state_bundle, load_team_worktree,
     mark_cycle_artifact_handoff, mark_cycle_replan, persist_team_state,
     update_team_environment_state, update_team_worktree, write_team_state_bundle,
 };
@@ -23,6 +24,7 @@ use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::{SessionSource, SubAgentSource};
 use codex_protocol::user_input::UserInput;
+use serde::Deserialize;
 use std::{
     borrow::Cow,
     io,
@@ -41,6 +43,10 @@ const TEAM_SKILL_REVIEW_LOOP: &str = "team-review-return-loop";
 const TEAM_SKILL_COMPACT: &str = "team-compact-continuation";
 const TEAM_SKILL_GOVERNANCE: &str = "team-governance-updates";
 const TEAM_SKILL_HANDOFF: &str = "team-sanitized-handoff";
+const TEAM_A2A_PROTOCOL: &str = "codex-a2a";
+const TEAM_A2A_VERSION: u32 = 1;
+const TEAM_A2A_MAX_SUMMARY_LEN: usize = 600;
+const TEAM_A2A_MAX_ARTIFACT_REFS: usize = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TeamRelationship {
@@ -58,6 +64,7 @@ pub(crate) struct PreparedTeamMessage {
     pub summary: String,
     pub artifact_refs: Vec<PathBuf>,
     pub integration_handoff: Option<TeamIntegrationHandoff>,
+    pub a2a_envelope: Option<TeamA2aEnvelope>,
 }
 
 pub(crate) async fn maybe_initialize_for_thread(
@@ -128,6 +135,7 @@ pub(crate) async fn prepare_team_message(
     receiver_thread_id: ThreadId,
     items: Vec<UserInput>,
 ) -> io::Result<PreparedTeamMessage> {
+    let workflow = load_effective_workflow(workspace_root).await?;
     let Some(sender) =
         load_team_state_bundle(workspace_root, &sender_thread_id.to_string()).await?
     else {
@@ -137,6 +145,7 @@ pub(crate) async fn prepare_team_message(
             items,
             artifact_refs: Vec::new(),
             integration_handoff: None,
+            a2a_envelope: None,
         });
     };
     let Some(receiver) =
@@ -148,18 +157,40 @@ pub(crate) async fn prepare_team_message(
             items,
             artifact_refs: Vec::new(),
             integration_handoff: None,
+            a2a_envelope: None,
         });
     };
-    match determine_relationship(&sender.record, &receiver.record) {
-        TeamRelationship::Sibling | TeamRelationship::SameTeam | TeamRelationship::None => {
-            Ok(PreparedTeamMessage {
-                relationship: determine_relationship(&sender.record, &receiver.record),
-                summary: summarize_input(&items),
+    let relationship = determine_relationship(&sender.record, &receiver.record);
+    if matches!(
+        relationship,
+        TeamRelationship::Vertical | TeamRelationship::SeparateBoundary
+    ) && looks_like_a2a_payload(&items)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "A2A peer messages are limited to same-level teams. Use the vertical artifact handoff contract instead.",
+        ));
+    }
+    match relationship {
+        TeamRelationship::Sibling | TeamRelationship::SameTeam => {
+            prepare_same_level_a2a(
+                workspace_root,
+                &workflow,
+                &sender,
+                &receiver,
+                relationship,
                 items,
-                artifact_refs: Vec::new(),
-                integration_handoff: None,
-            })
+            )
+            .await
         }
+        TeamRelationship::None => Ok(PreparedTeamMessage {
+            relationship,
+            summary: summarize_input(&items),
+            items,
+            artifact_refs: Vec::new(),
+            integration_handoff: None,
+            a2a_envelope: None,
+        }),
         TeamRelationship::Vertical | TeamRelationship::SeparateBoundary => {
             prepare_vertical_handoff(
                 workspace_root,
@@ -241,6 +272,7 @@ pub(crate) async fn record_child_team_spawn(
         Some(child.record.team_id.clone()),
         prepared.artifact_refs.clone(),
         Some("delegation".to_string()),
+        None,
     )
     .await?;
     if prepared.integration_handoff.is_some() {
@@ -252,11 +284,177 @@ pub(crate) async fn record_child_team_spawn(
             Some(parent.record.team_id.clone()),
             prepared.artifact_refs.clone(),
             Some("integration-ready".to_string()),
+            None,
         )
         .await?;
     }
     refresh_team_documents(workspace_root, &parent.record.team_id).await?;
     refresh_team_documents(workspace_root, &child.record.team_id).await
+}
+
+fn enforce_transition_policies(
+    workflow: &TeamWorkflowConfig,
+    sender: &mut TeamStateBundle,
+    prepared: &PreparedTeamMessage,
+    now: &str,
+) -> io::Result<()> {
+    let sender_iteration_role = infer_iteration_role(&sender.record.role);
+    let handoff_boundary = matches!(
+        prepared.relationship,
+        TeamRelationship::Vertical | TeamRelationship::SeparateBoundary
+    );
+
+    if workflow.workflow_loop.review_required
+        && prepared.integration_handoff.is_some()
+        && !review_evidence_recorded(sender, sender_iteration_role)
+    {
+        record_policy_failure(
+            sender,
+            TeamPhase::Review,
+            "Review evidence is required before integration-ready handoff.",
+            "Route the cycle through the review role and persist the review outcome before final handoff.",
+            now,
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reviewRequired blocked integration-ready handoff: record review evidence first.",
+        ));
+    }
+
+    if workflow.decision_policy.single_writer && handoff_boundary {
+        if let Some(iteration_role) = sender_iteration_role
+            && let Some(owner_team_id) = sender
+                .status
+                .cycle
+                .roles
+                .iter()
+                .find(|entry| entry.role == iteration_role)
+                .and_then(|entry| entry.owner_team_id.as_deref())
+            && owner_team_id != sender.record.team_id
+        {
+            record_policy_failure(
+                sender,
+                sender.status.current_phase.clone(),
+                "Single-writer policy blocked a non-owner finalize/handoff attempt.",
+                "Only the designated role owner may finalize this handoff.",
+                now,
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "singleWriter blocked finalize/handoff: only the designated owner may close this cycle.",
+            ));
+        }
+    }
+
+    if workflow.decision_policy.atomic_workflows
+        && handoff_boundary
+        && !has_atomic_checkpoint(sender, prepared)
+    {
+        record_policy_failure(
+            sender,
+            sender.status.current_phase.clone(),
+            "Atomic workflow requires persisted status, handoff, and governance checkpoints before finalize.",
+            "Persist the handoff manifest plus status.json, handoff.json, AGENT.md, and AGENT_TEAM.md before retrying.",
+            now,
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "atomicWorkflows blocked finalize/handoff: missing persisted checkpoint artifacts.",
+        ));
+    }
+
+    Ok(())
+}
+
+fn review_evidence_recorded(
+    sender: &TeamStateBundle,
+    sender_iteration_role: Option<IterationRole>,
+) -> bool {
+    if matches!(sender_iteration_role, Some(IterationRole::Review)) {
+        return true;
+    }
+    sender.status.cycle.roles.iter().any(|entry| {
+        entry.role == IterationRole::Review
+            && matches!(entry.state, super::state::TeamRoleState::Complete)
+    })
+}
+
+fn has_atomic_checkpoint(sender: &TeamStateBundle, prepared: &PreparedTeamMessage) -> bool {
+    if prepared.artifact_refs.is_empty() {
+        return false;
+    }
+    let required = [
+        &sender.paths.status_path,
+        &sender.paths.handoff_path,
+        &sender.paths.global_doc_path,
+        &sender.paths.team_doc_path,
+    ];
+    required
+        .iter()
+        .all(|path| prepared.artifact_refs.iter().any(|entry| entry == *path))
+}
+
+fn record_policy_failure(
+    sender: &mut TeamStateBundle,
+    phase: TeamPhase,
+    blocker: &str,
+    next_step: &str,
+    now: &str,
+) {
+    sender.status.cycle.phase = phase.clone();
+    sender.status.current_phase = phase;
+    sender.status.cycle.last_transition_at = now.to_string();
+    if !sender.status.blockers.iter().any(|entry| entry == blocker) {
+        sender.status.blockers.push(blocker.to_string());
+    }
+    if !sender
+        .status
+        .next_steps
+        .iter()
+        .any(|entry| entry == next_step)
+    {
+        sender.status.next_steps.push(next_step.to_string());
+    }
+    sender.recovery.blockers = sender.status.blockers.clone();
+    sender.recovery.next_steps = sender.status.next_steps.clone();
+    sender.recovery.updated_at = now.to_string();
+    sender.audit.entries.push(TeamAuditEntry {
+        kind: TeamAuditKind::Correction,
+        counterpart_team_id: None,
+        counterpart_thread_id: Some(sender.record.thread_id),
+        summary: blocker.to_string(),
+        artifact_refs: vec![
+            sender.paths.status_path.clone(),
+            sender.paths.handoff_path.clone(),
+            sender.paths.global_doc_path.clone(),
+            sender.paths.team_doc_path.clone(),
+        ],
+        detected_instruction_drift: false,
+        created_at: now.to_string(),
+    });
+    sender.audit.synthesized_skills = synthesize_skills(&sender.audit.entries);
+    sender.audit.updated_at = now.to_string();
+    sender.status.updated_at = now.to_string();
+}
+
+fn ensure_resume_artifacts(bundle: &TeamStateBundle) -> io::Result<()> {
+    for path in [
+        &bundle.paths.status_path,
+        &bundle.paths.handoff_path,
+        &bundle.paths.global_doc_path,
+        &bundle.paths.team_doc_path,
+    ] {
+        if !path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "resumeFromArtifacts requires persisted checkpoint `{}` before resume.",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn record_team_message_delivery(
@@ -265,6 +463,7 @@ pub(crate) async fn record_team_message_delivery(
     receiver_thread_id: ThreadId,
     prepared: &PreparedTeamMessage,
 ) -> io::Result<()> {
+    let workflow = load_effective_workflow(workspace_root).await?;
     let Some(mut sender) =
         load_team_state_bundle(workspace_root, &sender_thread_id.to_string()).await?
     else {
@@ -276,6 +475,12 @@ pub(crate) async fn record_team_message_delivery(
         return Ok(());
     };
     let now = Utc::now().to_rfc3339();
+    if let Err(err) = enforce_transition_policies(&workflow, &mut sender, prepared, &now) {
+        write_team_state_bundle(&sender).await?;
+        sync_operator_surface(&sender).await?;
+        refresh_team_documents(workspace_root, &sender.record.team_id).await?;
+        return Err(err);
+    }
     let drift = indicates_replan(&prepared.summary);
     let kind = if drift {
         TeamAuditKind::Correction
@@ -427,6 +632,7 @@ pub(crate) async fn record_team_message_delivery(
         Some(receiver.record.team_id.clone()),
         prepared.artifact_refs.clone(),
         Some("delivery".to_string()),
+        prepared.a2a_envelope.clone(),
     )
     .await?;
     append_team_tape_entry(
@@ -437,6 +643,7 @@ pub(crate) async fn record_team_message_delivery(
         Some(sender.record.team_id.clone()),
         prepared.artifact_refs.clone(),
         Some("delivery".to_string()),
+        prepared.a2a_envelope.clone(),
     )
     .await?;
     refresh_team_documents(workspace_root, &sender.record.team_id).await?;
@@ -444,9 +651,13 @@ pub(crate) async fn record_team_message_delivery(
 }
 
 pub(crate) async fn record_team_resume(workspace_root: &Path, team_id: &str) -> io::Result<()> {
+    let workflow = load_effective_workflow(workspace_root).await?;
     let Some(mut bundle) = load_team_state_bundle(workspace_root, team_id).await? else {
         return Ok(());
     };
+    if workflow.workflow_loop.resume_from_artifacts {
+        ensure_resume_artifacts(&bundle)?;
+    }
     let now = Utc::now().to_rfc3339();
     bundle.recovery.last_resumed_at = Some(now.clone());
     bundle.recovery.updated_at = now.clone();
@@ -458,6 +669,7 @@ pub(crate) async fn record_team_resume(workspace_root: &Path, team_id: &str) -> 
         artifact_refs: vec![
             bundle.paths.status_path.clone(),
             bundle.paths.handoff_path.clone(),
+            bundle.paths.global_doc_path.clone(),
             bundle.paths.team_doc_path.clone(),
         ],
         detected_instruction_drift: false,
@@ -476,11 +688,40 @@ pub(crate) async fn record_team_resume(workspace_root: &Path, team_id: &str) -> 
         vec![
             bundle.paths.status_path.clone(),
             bundle.paths.handoff_path.clone(),
+            bundle.paths.global_doc_path.clone(),
             bundle.paths.team_doc_path.clone(),
         ],
         Some("resume".to_string()),
+        None,
     )
     .await?;
+    refresh_team_documents(workspace_root, team_id).await
+}
+
+pub(crate) async fn record_team_compact_checkpoint(
+    workspace_root: &Path,
+    team_id: &str,
+) -> io::Result<()> {
+    let workflow = load_effective_workflow(workspace_root).await?;
+    if !workflow.workflow_loop.persist_before_compact {
+        return Ok(());
+    }
+    let Some(mut bundle) = load_team_state_bundle(workspace_root, team_id).await? else {
+        return Ok(());
+    };
+    let now = Utc::now().to_rfc3339();
+    bundle.recovery.last_compact_checkpoint_at = Some(now.clone());
+    bundle.recovery.blockers = bundle.status.blockers.clone();
+    bundle.recovery.next_steps = bundle.status.next_steps.clone();
+    bundle.recovery.governance_docs = vec![
+        bundle.paths.global_doc_path.clone(),
+        bundle.paths.team_doc_path.clone(),
+    ];
+    bundle.recovery.updated_at = now.clone();
+    bundle.status.compact_safe = true;
+    bundle.status.updated_at = now;
+    write_team_state_bundle(&bundle).await?;
+    sync_operator_surface(&bundle).await?;
     refresh_team_documents(workspace_root, team_id).await
 }
 
@@ -523,6 +764,7 @@ async fn record_bootstrap_tape_entry(bundle: &TeamStateBundle) -> io::Result<()>
             bundle.paths.team_doc_path.clone(),
         ],
         Some("bootstrap".to_string()),
+        None,
     )
     .await?;
     Ok(())
@@ -557,6 +799,7 @@ async fn record_worktree_tape_entry(bundle: &TeamStateBundle) -> io::Result<()> 
             bundle.paths.team_doc_path.clone(),
         ],
         Some("worktree".to_string()),
+        None,
     )
     .await?;
     Ok(())
@@ -1500,6 +1743,354 @@ fn determine_relationship(
     TeamRelationship::None
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct RawA2aEnvelope {
+    protocol: Option<String>,
+    version: Option<u32>,
+    intent: Option<String>,
+    summary: Option<String>,
+    artifact_refs: Option<Vec<PathBuf>>,
+    reply_needed: Option<bool>,
+    phase: Option<String>,
+}
+
+async fn load_effective_workflow(workspace_root: &Path) -> io::Result<TeamWorkflowConfig> {
+    Ok(load_workflow_from_workspace(workspace_root)
+        .await?
+        .unwrap_or_default())
+}
+
+fn looks_like_a2a_payload(items: &[UserInput]) -> bool {
+    items.iter().any(|item| match item {
+        UserInput::Text { text, .. } => {
+            let trimmed = text.trim_start();
+            if let Some(protocol_line) = trimmed
+                .lines()
+                .find(|line| line.trim_start().starts_with("protocol:"))
+            {
+                return protocol_line
+                    .split_once(':')
+                    .map(|(_, value)| value.trim().eq_ignore_ascii_case(TEAM_A2A_PROTOCOL))
+                    .unwrap_or(false);
+            }
+            if !trimmed.starts_with('{') {
+                return false;
+            }
+            serde_json::from_str::<serde_json::Value>(trimmed)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("protocol")
+                        .and_then(|protocol| protocol.as_str())
+                        .map(str::to_owned)
+                })
+                .is_some_and(|protocol| protocol.eq_ignore_ascii_case(TEAM_A2A_PROTOCOL))
+        }
+        _ => false,
+    })
+}
+
+async fn prepare_same_level_a2a(
+    workspace_root: &Path,
+    _workflow: &TeamWorkflowConfig,
+    sender: &TeamStateBundle,
+    receiver: &TeamStateBundle,
+    relationship: TeamRelationship,
+    items: Vec<UserInput>,
+) -> io::Result<PreparedTeamMessage> {
+    let envelope = parse_a2a_envelope(
+        workspace_root,
+        sender,
+        receiver,
+        relationship.clone(),
+        &items,
+    )?;
+    let manifest = render_a2a_manifest(&envelope);
+    Ok(PreparedTeamMessage {
+        relationship,
+        summary: envelope.summary.clone(),
+        items: vec![UserInput::Text {
+            text: manifest,
+            text_elements: Vec::new(),
+        }],
+        artifact_refs: envelope.artifact_refs.clone(),
+        integration_handoff: None,
+        a2a_envelope: Some(envelope),
+    })
+}
+
+fn parse_a2a_envelope(
+    workspace_root: &Path,
+    sender: &TeamStateBundle,
+    receiver: &TeamStateBundle,
+    relationship: TeamRelationship,
+    items: &[UserInput],
+) -> io::Result<TeamA2aEnvelope> {
+    let text = match items {
+        [UserInput::Text { text, .. }] => text.trim(),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Same-level coordination requires a single A2A text envelope. Raw multi-item passthrough is rejected.",
+            ));
+        }
+    };
+    if text.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "A2A envelope is empty. Provide protocol, intent, and summary fields.",
+        ));
+    }
+
+    let raw = if text.starts_with('{') {
+        serde_json::from_str::<RawA2aEnvelope>(text).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Invalid A2A envelope JSON: {err}"),
+            )
+        })?
+    } else {
+        parse_line_based_a2a_envelope(text)?
+    };
+
+    let protocol = raw
+        .protocol
+        .unwrap_or_else(|| TEAM_A2A_PROTOCOL.to_string());
+    if protocol != TEAM_A2A_PROTOCOL {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Unsupported A2A protocol `{protocol}`. Expected `{TEAM_A2A_PROTOCOL}`."),
+        ));
+    }
+    let version = raw.version.unwrap_or(TEAM_A2A_VERSION);
+    if version != TEAM_A2A_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Unsupported A2A version `{version}`. Expected `{TEAM_A2A_VERSION}`."),
+        ));
+    }
+    let Some(intent) = raw.intent.as_deref().map(parse_a2a_intent).transpose()? else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "A2A envelope must include an `intent` field.",
+        ));
+    };
+    let Some(summary) = raw.summary.as_deref().map(str::trim) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "A2A envelope must include a bounded `summary` field.",
+        ));
+    };
+    if summary.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "A2A summary must not be empty.",
+        ));
+    }
+    if summary.len() > TEAM_A2A_MAX_SUMMARY_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "A2A summary exceeds the {} character limit. Persist details to artifacts and reference them instead.",
+                TEAM_A2A_MAX_SUMMARY_LEN
+            ),
+        ));
+    }
+    let Some(a2a_relationship) = map_a2a_relationship(&relationship) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "A2A peer messaging is only allowed between same-team or sibling teams.",
+        ));
+    };
+    let phase = raw
+        .phase
+        .as_deref()
+        .map(parse_team_phase)
+        .transpose()?
+        .unwrap_or_else(|| sender.status.current_phase.clone());
+    let raw_artifact_refs = raw.artifact_refs.unwrap_or_default();
+    if raw_artifact_refs.len() > TEAM_A2A_MAX_ARTIFACT_REFS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "A2A envelopes may reference at most {} artifacts.",
+                TEAM_A2A_MAX_ARTIFACT_REFS
+            ),
+        ));
+    }
+    let artifact_refs = raw_artifact_refs
+        .into_iter()
+        .map(|path| {
+            sanitize_workspace_path(
+                &workspace_root.join(path),
+                workspace_root,
+                "redacted-artifact",
+            )
+        })
+        .collect::<Vec<_>>();
+    let sender_public_id = public_team_ref(
+        &sender.record.team_id,
+        &sender.record.role,
+        sender.record.depth,
+        sender.record.kind.clone(),
+    );
+    let recipient_public_id = public_team_ref(
+        &receiver.record.team_id,
+        &receiver.record.role,
+        receiver.record.depth,
+        receiver.record.kind.clone(),
+    );
+    Ok(TeamA2aEnvelope {
+        protocol,
+        version,
+        sender_public_id,
+        recipient_public_id,
+        relationship: a2a_relationship,
+        phase,
+        intent,
+        summary: sanitize_summary_text(summary),
+        artifact_refs,
+        reply_needed: raw.reply_needed.unwrap_or(false),
+    })
+}
+
+fn parse_line_based_a2a_envelope(text: &str) -> io::Result<RawA2aEnvelope> {
+    let mut raw = RawA2aEnvelope::default();
+    let mut artifact_refs = Vec::new();
+    let mut reading_artifacts = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if reading_artifacts {
+            if let Some(value) = trimmed.strip_prefix("- ") {
+                artifact_refs.push(PathBuf::from(value.trim()));
+                continue;
+            }
+            reading_artifacts = false;
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        match key.as_str() {
+            "protocol" => raw.protocol = Some(value.to_string()),
+            "version" => {
+                raw.version = Some(value.parse().map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("Invalid A2A version `{value}`: {err}"),
+                    )
+                })?)
+            }
+            "intent" => raw.intent = Some(value.to_string()),
+            "summary" => raw.summary = Some(value.to_string()),
+            "reply_needed" => raw.reply_needed = Some(parse_bool_field(value, "reply_needed")?),
+            "phase" => raw.phase = Some(value.to_string()),
+            "artifact_refs" | "artifacts" => {
+                reading_artifacts = true;
+                if !value.is_empty() {
+                    artifact_refs.extend(
+                        value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|item| !item.is_empty())
+                            .map(PathBuf::from),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    if !artifact_refs.is_empty() {
+        raw.artifact_refs = Some(artifact_refs);
+    }
+    Ok(raw)
+}
+
+fn parse_bool_field(value: &str, field: &str) -> io::Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "1" => Ok(true),
+        "false" | "no" | "0" => Ok(false),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid boolean for `{field}`: `{value}`."),
+        )),
+    }
+}
+
+fn parse_a2a_intent(value: &str) -> io::Result<TeamA2aIntent> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "align" => Ok(TeamA2aIntent::Align),
+        "request" => Ok(TeamA2aIntent::Request),
+        "answer" => Ok(TeamA2aIntent::Answer),
+        "blocker" => Ok(TeamA2aIntent::Blocker),
+        "handoff_ready" | "handoff-ready" => Ok(TeamA2aIntent::HandoffReady),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Unsupported A2A intent `{other}`."),
+        )),
+    }
+}
+
+fn parse_team_phase(value: &str) -> io::Result<TeamPhase> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "bootstrap" => Ok(TeamPhase::Bootstrap),
+        "design" => Ok(TeamPhase::Design),
+        "development" => Ok(TeamPhase::Development),
+        "review" => Ok(TeamPhase::Review),
+        "replan" => Ok(TeamPhase::Replan),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Unsupported A2A phase `{other}`."),
+        )),
+    }
+}
+
+fn map_a2a_relationship(relationship: &TeamRelationship) -> Option<TeamA2aRelationship> {
+    match relationship {
+        TeamRelationship::SameTeam => Some(TeamA2aRelationship::SameTeam),
+        TeamRelationship::Sibling => Some(TeamA2aRelationship::Sibling),
+        _ => None,
+    }
+}
+
+fn render_a2a_manifest(envelope: &TeamA2aEnvelope) -> String {
+    let relationship = match envelope.relationship {
+        TeamA2aRelationship::SameTeam => "same_team",
+        TeamA2aRelationship::Sibling => "sibling",
+    };
+    let intent = match envelope.intent {
+        TeamA2aIntent::Align => "align",
+        TeamA2aIntent::Request => "request",
+        TeamA2aIntent::Answer => "answer",
+        TeamA2aIntent::Blocker => "blocker",
+        TeamA2aIntent::HandoffReady => "handoff_ready",
+    };
+    let phase = format_team_phase(&envelope.phase);
+    let artifact_refs = if envelope.artifact_refs.is_empty() {
+        "- none".to_string()
+    } else {
+        envelope
+            .artifact_refs
+            .iter()
+            .map(|path| format!("- {}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "protocol: {TEAM_A2A_PROTOCOL}\nversion: {TEAM_A2A_VERSION}\nsender: {}\nrecipient: {}\nrelationship: {relationship}\nphase: {phase}\nintent: {intent}\nreply_needed: {}\nsummary: {}\nartifact_refs:\n{}",
+        envelope.sender_public_id,
+        envelope.recipient_public_id,
+        envelope.reply_needed,
+        envelope.summary,
+        artifact_refs
+    )
+}
+
 async fn prepare_vertical_handoff(
     workspace_root: &Path,
     sender_team_id: &str,
@@ -1514,6 +2105,7 @@ async fn prepare_vertical_handoff(
             items,
             artifact_refs: Vec::new(),
             integration_handoff: None,
+            a2a_envelope: None,
         });
     };
     let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
@@ -1576,6 +2168,7 @@ async fn prepare_vertical_handoff(
         }],
         artifact_refs,
         integration_handoff,
+        a2a_envelope: None,
     })
 }
 

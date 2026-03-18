@@ -93,7 +93,15 @@ jobs:
           cargo test -p codex-app-server-protocol serialize_team_workflow_session_read -- --exact
           cargo test -p codex-app-server-protocol serialize_team_workflow_session_updated_notification -- --exact
           cargo test -p codex-core public_team_visibility_hides_child_threads_but_keeps_root_public -- --exact
+          cargo test -p codex-core public_team_session_exposes_root_only_lifecycle_summary -- --exact
+          cargo test -p codex-core sibling_peer_messages_require_structured_a2a_and_persist_peer_shape -- --exact
+          cargo test -p codex-core vertical_a2a_payload_is_rejected_with_artifact_guidance -- --exact
+          cargo test -p codex-core vertical_handoff_allows_json_payload_without_a2a_protocol -- --exact
+          cargo test -p codex-core development_handoff_requires_review_evidence_before_integration_ready -- --exact
+          cargo test -p codex-core compact_checkpoint_and_resume_enforce_artifact_first_recovery -- --exact
+          cargo test -p codex-core sanitize_tape_export_redacts_workspace_root_and_hidden_team_ids -- --exact
           cargo test -p codex-app-server hidden_thread_suppresses_status_notifications_and_public_status -- --exact
+          cargo test -p codex-app-server team_ops_ui_is_allowed_for_loopback_only_by_default -- --exact
 
       - name: Validate team ops UI syntax
         shell: bash
