@@ -1654,6 +1654,10 @@ mod tests {
                     active_team_count: 2,
                     blocked_team_count: 1,
                     stale_resource_count: 1,
+                    memory_provider: v2::TeamWorkflowMemoryProvider {
+                        mode: v2::TeamWorkflowMemoryProviderMode::Local,
+                        health: v2::TeamWorkflowMemoryProviderHealth::Ready,
+                    },
                     global_governance_path: absolute_path(".codex/AGENT.md").into(),
                     team_state_index_path: absolute_path(".codex/team-state/index.json").into(),
                     teams: vec![v2::TeamWorkflowTeam {
@@ -1823,6 +1827,10 @@ mod tests {
                     active_team_count: 1,
                     blocked_team_count: 0,
                     stale_resource_count: 0,
+                    memory_provider: v2::TeamWorkflowMemoryProvider {
+                        mode: v2::TeamWorkflowMemoryProviderMode::Local,
+                        health: v2::TeamWorkflowMemoryProviderHealth::Ready,
+                    },
                     global_governance_path: absolute_path(".codex/AGENT.md").into(),
                     team_state_index_path: absolute_path(".codex/team-state/index.json").into(),
                     teams: vec![],
