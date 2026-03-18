@@ -1,13 +1,17 @@
 use super::config::{
     ExecutionMode, GLOBAL_AGENT_DOC_FILENAME, GovernanceTrigger, IterationRole,
-    TEAM_AGENT_DOC_FILENAME, TeamWorkflowConfig, load_workflow_from_workspace,
-    resolve_team_home_root, workflow_path,
+    TEAM_AGENT_DOC_FILENAME, TEAM_DIRNAME, TEAM_STATE_DIRNAME, TeamWorkflowConfig,
+    load_workflow_from_workspace, resolve_team_home_root, workflow_path,
+};
+use super::redaction::{
+    public_team_ref, public_worktree_label, sanitize_summary_text, sanitize_user_input_summary,
+    sanitize_workspace_path, vertical_receiver_label,
 };
 use super::state::{
     TeamAuditEntry, TeamAuditKind, TeamEnvironmentState, TeamIntegrationHandoff,
     TeamIntegrationMode, TeamKind, TeamManagedResource, TeamManagedResourceKind,
     TeamManagedResourceStatus, TeamPhase, TeamStateBundle, TeamStatePaths, TeamStateRecord,
-    TeamStateWriteRequest, TeamTapeKind, TeamWorktreeState, append_team_tape_entry,
+    TeamStateWriteRequest, TeamTapeEntry, TeamTapeKind, TeamWorktreeState, append_team_tape_entry,
     apply_role_assignment, indicates_replan, load_team_state_bundle, load_team_worktree,
     mark_cycle_artifact_handoff, mark_cycle_replan, persist_team_state,
     update_team_environment_state, update_team_worktree, write_team_state_bundle,
@@ -29,6 +33,14 @@ use tokio::process::Command;
 
 const GENERATED_SECTION_START: &str = "<!-- codex-team-runtime:start -->";
 const GENERATED_SECTION_END: &str = "<!-- codex-team-runtime:end -->";
+const GOVERNANCE_PROMPTS_DIR: &str = "team-governance/prompts";
+const TEAM_OPS_DIRNAME: &str = "team-ops";
+
+const TEAM_SKILL_DELEGATION: &str = "team-delegation";
+const TEAM_SKILL_REVIEW_LOOP: &str = "team-review-return-loop";
+const TEAM_SKILL_COMPACT: &str = "team-compact-continuation";
+const TEAM_SKILL_GOVERNANCE: &str = "team-governance-updates";
+const TEAM_SKILL_HANDOFF: &str = "team-sanitized-handoff";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TeamRelationship {
@@ -83,10 +95,12 @@ pub(crate) async fn maybe_initialize_for_thread(
     let bundle = load_team_state_bundle(&team_home_root, &record.team_id)
         .await?
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "team bundle missing"))?;
+    ensure_governance_assets(&team_home_root, &workflow).await?;
     if matches!(scope, TeamSessionScope::Root) {
         ensure_global_agent_doc(&paths, &bundle, &workflow).await?;
     }
     ensure_team_agent_doc(&paths, &bundle, &workflow).await?;
+    sync_operator_surface(&bundle).await?;
     if let Some(parent_team_id) = record.parent_team_id.as_deref() {
         refresh_team_documents(&team_home_root, parent_team_id).await?;
     }
@@ -217,6 +231,8 @@ pub(crate) async fn record_child_team_spawn(
     child.handoff.updated_at = now.clone();
     write_team_state_bundle(&parent).await?;
     write_team_state_bundle(&child).await?;
+    sync_operator_surface(&parent).await?;
+    sync_operator_surface(&child).await?;
     append_team_tape_entry(
         &parent.record.workspace_root,
         &parent.record.team_id,
@@ -391,6 +407,8 @@ pub(crate) async fn record_team_message_delivery(
     }
     write_team_state_bundle(&sender).await?;
     write_team_state_bundle(&receiver).await?;
+    sync_operator_surface(&sender).await?;
+    sync_operator_surface(&receiver).await?;
     let tape_kind = if matches!(
         prepared.relationship,
         TeamRelationship::Sibling | TeamRelationship::SameTeam
@@ -448,6 +466,7 @@ pub(crate) async fn record_team_resume(workspace_root: &Path, team_id: &str) -> 
     bundle.audit.synthesized_skills = synthesize_skills(&bundle.audit.entries);
     bundle.audit.updated_at = now;
     write_team_state_bundle(&bundle).await?;
+    sync_operator_surface(&bundle).await?;
     append_team_tape_entry(
         &bundle.record.workspace_root,
         &bundle.record.team_id,
@@ -472,10 +491,12 @@ pub(crate) async fn refresh_team_documents(workspace_root: &Path, team_id: &str)
     let Some(bundle) = load_team_state_bundle(workspace_root, team_id).await? else {
         return Ok(());
     };
+    ensure_governance_assets(workspace_root, &workflow).await?;
     if bundle.record.kind == TeamKind::Root {
         ensure_global_agent_doc(&bundle.paths, &bundle, &workflow).await?;
     }
-    ensure_team_agent_doc(&bundle.paths, &bundle, &workflow).await
+    ensure_team_agent_doc(&bundle.paths, &bundle, &workflow).await?;
+    sync_operator_surface(&bundle).await
 }
 
 async fn record_bootstrap_tape_entry(bundle: &TeamStateBundle) -> io::Result<()> {
@@ -487,8 +508,8 @@ async fn record_bootstrap_tape_entry(bundle: &TeamStateBundle) -> io::Result<()>
         return Ok(());
     }
     let summary = format!(
-        "Initialized team `{}` at depth {} with role `{}`.",
-        bundle.record.team_id, bundle.record.depth, bundle.record.role
+        "Initialized team at depth {} with role `{}`.",
+        bundle.record.depth, bundle.record.role
     );
     append_team_tape_entry(
         &bundle.record.workspace_root,
@@ -513,7 +534,16 @@ async fn record_worktree_tape_entry(bundle: &TeamStateBundle) -> io::Result<()> 
     };
     let summary = format!(
         "Assigned checkout `{}` with branch namespace `{}`.",
-        worktree.checkout_path.display(),
+        public_worktree_label(
+            &public_team_ref(
+                &bundle.record.team_id,
+                &bundle.record.role,
+                bundle.record.depth,
+                bundle.record.kind.clone(),
+            ),
+            worktree.managed
+        )
+        .display(),
         worktree.branch_name
     );
     append_team_tape_entry(
@@ -881,6 +911,353 @@ impl TeamSessionScope {
     }
 }
 
+async fn ensure_governance_assets(
+    workspace_root: &Path,
+    workflow: &TeamWorkflowConfig,
+) -> io::Result<()> {
+    let codex_root = resolve_team_home_root(workspace_root).join(".codex");
+    for (relative_path, contents) in governance_prompt_assets() {
+        let path = codex_root.join(relative_path);
+        let generated = wrap_generated_asset(&contents);
+        upsert_generated_markdown(&path, generated.clone(), generated).await?;
+    }
+    for (skill_name, contents) in governance_skill_assets(workflow) {
+        let path = codex_root.join("skills").join(skill_name).join("SKILL.md");
+        let generated = wrap_generated_asset(&contents);
+        upsert_generated_markdown(&path, generated.clone(), generated).await?;
+    }
+    Ok(())
+}
+
+fn governance_prompt_assets() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "team-governance/prompts/scheduler.md",
+            r#"# Scheduler Decision Model
+
+- Own the team charter, root plan, and final user interaction surface.
+- Maintain the triad loop: design, development, review must all participate in each substantive cycle.
+- Choose direct execution only for blocking work that is cheaper to finish locally than to delegate.
+- Delegate bounded work with explicit ownership, expected artifacts, and recovery checkpoints.
+- Escalate or replan when review returns drift, boundary uncertainty, or missing architecture.
+- Keep `AGENT.md` current when global governance, escalation rules, or delivery policy changes.
+"#
+            .to_string(),
+        ),
+        (
+            "team-governance/prompts/leader.md",
+            r#"# Team Leader Decision Model
+
+- Translate parent intent into bounded team work without leaking hidden context upward.
+- Preserve version discipline: maintain branch/worktree awareness, checkpoint progress, and clean stale resources.
+- Use sibling syncs for alignment and vertical handoffs for artifacts only.
+- Update `AGENT_TEAM.md` before the next delegation round whenever review changes local rules or reusable skills.
+- Summarize blockers, next actions, and declared outputs instead of forwarding raw transcripts.
+"#
+            .to_string(),
+        ),
+        (
+            "team-governance/prompts/worker.md",
+            r#"# Worker Decision Model
+
+- Execute the assigned bounded task and keep changes inside the agreed ownership boundary.
+- Persist progress in artifacts and status files before compacting or yielding.
+- Raise blockers early with concrete evidence, not speculative context dumps.
+- Hand work back through sanitized artifact bundles that declare outputs, blockers, and next action.
+"#
+            .to_string(),
+        ),
+        (
+            "team-governance/prompts/designer.md",
+            r#"# Designer Decision Model
+
+- Define system boundaries, interfaces, constraints, and module responsibilities before implementation fan-out.
+- Make dependencies, integration contracts, and review checkpoints explicit.
+- Re-open design when implementation or review reveals drift, missing boundaries, or coordination risk.
+"#
+            .to_string(),
+        ),
+        (
+            "team-governance/prompts/developer.md",
+            r#"# Developer Decision Model
+
+- Implement the planned slice with minimal, reviewable changes and explicit validation.
+- Keep the assigned environment healthy, clean stale resources, and surface integration risks early.
+- Deliver code plus artifacts that a reviewer or parent can consume without hidden transcript context.
+"#
+            .to_string(),
+        ),
+        (
+            "team-governance/prompts/reviewer.md",
+            r#"# Reviewer Decision Model
+
+- Review against requirements, architecture boundaries, regression risk, and process adherence.
+- Return work to design or development when scope drift, unsafe exposure, or weak validation is found.
+- Capture reusable team skills when recurring issues or strong patterns emerge.
+"#
+            .to_string(),
+        ),
+    ]
+}
+
+fn governance_skill_assets(workflow: &TeamWorkflowConfig) -> Vec<(&'static str, String)> {
+    let roles = workflow
+        .workflow_loop
+        .required_roles
+        .iter()
+        .map(|role| format!("`{}`", format_iteration_role(*role)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![
+        (
+            TEAM_SKILL_DELEGATION,
+            r#"---
+name: team-delegation
+description: Delegate bounded work with explicit ownership, artifact requirements, and return conditions.
+---
+
+- Delegate only when the worker can complete the slice without hidden parent context.
+- Include scope, owner, expected artifacts, validation target, and compact checkpoint in every delegation.
+- Tell workers to preserve others' edits and avoid reverting unrelated work.
+"#
+            .to_string(),
+        ),
+        (
+            TEAM_SKILL_REVIEW_LOOP,
+            format!(
+                r#"---
+name: team-review-return-loop
+description: Run the design-development-review loop with explicit return-to-design or return-to-development conditions.
+---
+
+- Every substantive cycle must cover {}.
+- When review finds drift, boundary mismatch, or missing validation, return work with concrete findings and update `AGENT_TEAM.md` before the next delegation round.
+- Do not bypass review just because the branch builds.
+"#
+                ,
+                roles
+            ),
+        ),
+        (
+            TEAM_SKILL_COMPACT,
+            r#"---
+name: team-compact-continuation
+description: Preserve team progress across compaction or interruption.
+---
+
+- Before compact, persist blockers, next steps, artifacts, and governance updates.
+- Resume from `status.json`, `handoff.json`, `team-tape.jsonl`, `AGENT.md`, and `AGENT_TEAM.md` instead of hidden transcript memory.
+"#
+            .to_string(),
+        ),
+        (
+            TEAM_SKILL_GOVERNANCE,
+            r#"---
+name: team-governance-updates
+description: Update global and team governance documents when process rules change.
+---
+
+- The root scheduler owns `AGENT.md`.
+- Each team leader owns `AGENT_TEAM.md` for local scope, retrospectives, reusable skills, and recovery notes.
+- Update governance docs on team creation, replan, review handoff, compact, or leader resume.
+"#
+            .to_string(),
+        ),
+        (
+            TEAM_SKILL_HANDOFF,
+            r#"---
+name: team-sanitized-handoff
+description: Author vertical handoffs using structured summaries and safe artifact references only.
+---
+
+- Cross-level handoffs may include summaries, blockers, next actions, governance deltas, and safe artifact references.
+- Do not include raw transcript dumps, unsafe absolute paths, or hidden child identifiers in vertical artifacts.
+"#
+            .to_string(),
+        ),
+    ]
+}
+
+fn role_prompt_relative_path(record: &TeamStateRecord) -> &'static str {
+    if record.kind == TeamKind::Root {
+        return "team-governance/prompts/scheduler.md";
+    }
+    let normalized = record.role.to_ascii_lowercase();
+    if normalized.contains("review") {
+        "team-governance/prompts/reviewer.md"
+    } else if normalized.contains("design") || normalized.contains("architect") {
+        "team-governance/prompts/designer.md"
+    } else if normalized.contains("dev")
+        || normalized.contains("implement")
+        || normalized.contains("build")
+    {
+        "team-governance/prompts/developer.md"
+    } else if normalized.contains("worker") {
+        "team-governance/prompts/worker.md"
+    } else {
+        "team-governance/prompts/leader.md"
+    }
+}
+
+fn operator_surface_root(workspace_root: &Path) -> PathBuf {
+    resolve_team_home_root(workspace_root)
+        .join(".codex")
+        .join(TEAM_OPS_DIRNAME)
+}
+
+fn operator_team_root(record: &TeamStateRecord) -> PathBuf {
+    operator_surface_root(&record.workspace_root)
+        .join("teams")
+        .join(public_team_ref(
+            &record.team_id,
+            &record.role,
+            record.depth,
+            record.kind.clone(),
+        ))
+}
+
+fn operator_visible_path(bundle: &TeamStateBundle, actual_path: &Path) -> PathBuf {
+    let record = &bundle.record;
+    let operator_root = operator_surface_root(&record.workspace_root);
+    let team_root = operator_team_root(record);
+    if actual_path == record.global_doc_path {
+        return operator_root.join("AGENT.md");
+    }
+    if actual_path == record.team_doc_path {
+        return team_root.join("AGENT_TEAM.md");
+    }
+    if actual_path == record.status_path {
+        return team_root.join("status.json");
+    }
+    if actual_path == record.handoff_path {
+        return team_root.join("handoff.json");
+    }
+    if actual_path == bundle.paths.tape_path {
+        return team_root.join("team-tape.jsonl");
+    }
+    if let Ok(relative) = actual_path.strip_prefix(&record.artifacts_dir) {
+        return team_root.join("artifacts").join(relative);
+    }
+    team_root
+        .join("artifacts")
+        .join(actual_path.file_name().unwrap_or_default())
+}
+
+fn resolve_workspace_path(workspace_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
+    }
+}
+
+async fn owning_bundle_for_path(
+    workspace_root: &Path,
+    actual_path: &Path,
+) -> io::Result<Option<TeamStateBundle>> {
+    let team_state_root = resolve_team_home_root(workspace_root)
+        .join(TEAM_DIRNAME)
+        .join(TEAM_STATE_DIRNAME);
+    let relative = match actual_path.strip_prefix(&team_state_root) {
+        Ok(relative) => relative,
+        Err(_) => return Ok(None),
+    };
+    let Some(team_id) = relative
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+    else {
+        return Ok(None);
+    };
+    load_team_state_bundle(workspace_root, team_id).await
+}
+
+async fn operator_visible_path_for_workspace(
+    bundle: &TeamStateBundle,
+    path: &Path,
+) -> io::Result<PathBuf> {
+    let actual_path = resolve_workspace_path(&bundle.record.workspace_root, path);
+    if let Some(owner_bundle) =
+        owning_bundle_for_path(&bundle.record.workspace_root, &actual_path).await?
+    {
+        return Ok(operator_visible_path(&owner_bundle, &actual_path));
+    }
+    Ok(operator_visible_path(bundle, &actual_path))
+}
+
+async fn mirror_operator_file(bundle: &TeamStateBundle, actual_path: &Path) -> io::Result<()> {
+    let actual_path = resolve_workspace_path(&bundle.record.workspace_root, actual_path);
+    if !fs::try_exists(&actual_path).await.unwrap_or(false) {
+        return Ok(());
+    }
+    let mirror_path = operator_visible_path_for_workspace(bundle, &actual_path).await?;
+    if let Some(parent) = mirror_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let contents = fs::read(actual_path).await?;
+    fs::write(mirror_path, contents).await
+}
+
+async fn mirror_operator_index(bundle: &TeamStateBundle) -> io::Result<()> {
+    if bundle.record.kind != TeamKind::Root
+        || !fs::try_exists(&bundle.paths.index_path)
+            .await
+            .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let mirror_path = operator_surface_root(&bundle.record.workspace_root).join("index.json");
+    if let Some(parent) = mirror_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let contents = fs::read(&bundle.paths.index_path).await?;
+    fs::write(mirror_path, contents).await
+}
+
+async fn mirror_handoff_artifacts(bundle: &TeamStateBundle) -> io::Result<()> {
+    for artifact in &bundle.handoff.produced_artifacts {
+        mirror_operator_file(bundle, Path::new(artifact)).await?;
+    }
+    if let Some(integration) = bundle.handoff.integration.as_ref()
+        && let Some(patch_path) = integration.patch_path.as_ref()
+    {
+        mirror_operator_file(bundle, patch_path).await?;
+    }
+    Ok(())
+}
+
+async fn mirror_tape_artifacts(bundle: &TeamStateBundle) -> io::Result<()> {
+    let contents = match fs::read_to_string(&bundle.paths.tape_path).await {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+        let entry = match serde_json::from_str::<TeamTapeEntry>(line) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        for artifact_ref in entry.artifact_refs {
+            mirror_operator_file(bundle, &artifact_ref).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn sync_operator_surface(bundle: &TeamStateBundle) -> io::Result<()> {
+    mirror_operator_index(bundle).await?;
+    mirror_operator_file(bundle, &bundle.paths.status_path).await?;
+    mirror_operator_file(bundle, &bundle.paths.handoff_path).await?;
+    mirror_operator_file(bundle, &bundle.paths.tape_path).await?;
+    mirror_operator_file(bundle, &bundle.paths.team_doc_path).await?;
+    mirror_handoff_artifacts(bundle).await?;
+    mirror_tape_artifacts(bundle).await?;
+    if bundle.record.kind == TeamKind::Root {
+        mirror_operator_file(bundle, &bundle.paths.global_doc_path).await?;
+    }
+    Ok(())
+}
+
 async fn ensure_global_agent_doc(
     paths: &TeamStatePaths,
     bundle: &TeamStateBundle,
@@ -950,6 +1327,13 @@ fn merge_generated_section(existing: String, generated: String) -> String {
     )
 }
 
+fn wrap_generated_asset(contents: &str) -> String {
+    format!(
+        "{GENERATED_SECTION_START}\n{}\n{GENERATED_SECTION_END}\n",
+        contents.trim()
+    )
+}
+
 fn render_global_runtime_section(
     paths: &TeamStatePaths,
     bundle: &TeamStateBundle,
@@ -989,14 +1373,20 @@ fn render_global_runtime_section(
         .map(|trigger| format!("`{}`", format_governance_trigger(*trigger)))
         .collect::<Vec<_>>()
         .join(", ");
+    let prompt_root = Path::new(".codex").join(GOVERNANCE_PROMPTS_DIR);
     format!(
-        "{GENERATED_SECTION_START}\n## Runtime Checkpoint\n- Root team: `{}`\n- Workflow: `{}`\n- Team state index: `{}`\n- Status snapshot: `{}`\n- Handoff metadata: `{}`\n- Team tape: `{}`\n- Root checkout: `{}`\n- Root branch namespace: `{}`\n- Active child teams: `{}`\n- Current phase: `{}`\n- Allowed execution modes: {}\n- Required iteration roles: {}\n- Maximum nested team depth: `{}`\n- Governance update triggers: {}\n- Last updated: `{}`\n{GENERATED_SECTION_END}",
+        "{GENERATED_SECTION_START}\n## Runtime Checkpoint\n- Root team: `{}`\n- Workflow: `{}`\n- Team state index: `{}`\n- Status snapshot: `{}`\n- Handoff metadata: `{}`\n- Team tape: `{}`\n- Governance prompt root: `{}`\n- Scheduler prompt: `.codex/{}`\n- Shared team skills: `.codex/skills/{}/SKILL.md`, `.codex/skills/{}/SKILL.md`, `.codex/skills/{}/SKILL.md`\n- Root checkout: `{}`\n- Root branch namespace: `{}`\n- Active child teams: `{}`\n- Current phase: `{}`\n- Allowed execution modes: {}\n- Required iteration roles: {}\n- Maximum nested team depth: `{}`\n- Governance update triggers: {}\n- Last updated: `{}`\n{GENERATED_SECTION_END}",
         record.team_id,
         display_path(&record.workflow_path, &record.workspace_root),
         display_path(&paths.index_path, &record.workspace_root),
         display_path(&record.status_path, &record.workspace_root),
         display_path(&record.handoff_path, &record.workspace_root),
         display_path(&bundle.paths.tape_path, &record.workspace_root),
+        prompt_root.display(),
+        role_prompt_relative_path(record),
+        TEAM_SKILL_DELEGATION,
+        TEAM_SKILL_REVIEW_LOOP,
+        TEAM_SKILL_GOVERNANCE,
         root_checkout,
         root_branch,
         record.child_team_ids.len(),
@@ -1049,14 +1439,19 @@ fn render_team_runtime_section(bundle: &TeamStateBundle, workflow: &TeamWorkflow
     } else {
         bundle.audit.synthesized_skills.join(" | ")
     };
+    let role_prompt = role_prompt_relative_path(record);
     format!(
-        "{GENERATED_SECTION_START}\n## Runtime Checkpoint\n- Artifacts directory: `{}`\n- Status snapshot: `{}`\n- Handoff metadata: `{}`\n- Recovery snapshot: `{}`\n- Audit log: `{}`\n- Team tape: `{}`\n- Checkout path: `{}`\n- Branch namespace: `{}`\n- Current branch: `{}`\n- Managed linked worktree: `{}`\n- Active managed resources: `{}`\n- Stale resources: `{}`\n- Last rollout: `{}`\n- Same-level protocol: `a2a`\n- Cross-level contract: `openspec-artifacts`\n- Required cycle roles: {}\n- Current cycle phase: `{}`\n- Replan reason: `{}`\n- Active child teams: `{}`\n- Recovered blockers: `{}`\n- Next steps: `{}`\n- Synthesized skills: `{}`\n- Last updated: `{}`\n{GENERATED_SECTION_END}",
+        "{GENERATED_SECTION_START}\n## Runtime Checkpoint\n- Artifacts directory: `{}`\n- Status snapshot: `{}`\n- Handoff metadata: `{}`\n- Recovery snapshot: `{}`\n- Audit log: `{}`\n- Team tape: `{}`\n- Role decision model: `.codex/{}`\n- Reusable team skills: `.codex/skills/{}/SKILL.md`, `.codex/skills/{}/SKILL.md`, `.codex/skills/{}/SKILL.md`\n- Checkout path: `{}`\n- Branch namespace: `{}`\n- Current branch: `{}`\n- Managed linked worktree: `{}`\n- Active managed resources: `{}`\n- Stale resources: `{}`\n- Last rollout: `{}`\n- Same-level protocol: `a2a`\n- Cross-level contract: `openspec-artifacts`\n- Required cycle roles: {}\n- Current cycle phase: `{}`\n- Replan reason: `{}`\n- Active child teams: `{}`\n- Recovered blockers: `{}`\n- Next steps: `{}`\n- Synthesized skills: `{}`\n- Last updated: `{}`\n{GENERATED_SECTION_END}",
         display_path(&record.artifacts_dir, &record.workspace_root),
         display_path(&record.status_path, &record.workspace_root),
         display_path(&record.handoff_path, &record.workspace_root),
         display_path(&bundle.paths.recovery_path, &record.workspace_root),
         display_path(&bundle.paths.audit_path, &record.workspace_root),
         display_path(&bundle.paths.tape_path, &record.workspace_root),
+        role_prompt,
+        TEAM_SKILL_DELEGATION,
+        TEAM_SKILL_COMPACT,
+        TEAM_SKILL_HANDOFF,
         worktree_checkout,
         worktree_branch,
         current_branch,
@@ -1122,42 +1517,23 @@ async fn prepare_vertical_handoff(
         });
     };
     let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let receiver_suffix = receiver_team_id
-        .map(|team_id| format!("-to-{team_id}"))
-        .unwrap_or_else(|| "-to-child".to_string());
+    let receiver_bundle = match receiver_team_id {
+        Some(team_id) => load_team_state_bundle(workspace_root, team_id).await?,
+        None => None,
+    };
+    let receiver_suffix =
+        vertical_receiver_label(sender.record.parent_team_id.as_deref(), receiver_team_id);
     let artifact_path = sender
         .paths
         .artifacts_dir
-        .join(format!("{prefix}-{timestamp}{receiver_suffix}.md"));
+        .join(format!("{prefix}-{timestamp}-to-{receiver_suffix}.md"));
     if let Some(parent) = artifact_path.parent() {
         fs::create_dir_all(parent).await?;
     }
-    let summary = summarize_input(&items);
-    fs::write(
-        &artifact_path,
-        format!(
-            "# OpenSpec Handoff\n\n## Work Brief\n{}\n\n## Input Items\n{}\n",
-            summary,
-            render_input(&items)
-        ),
-    )
-    .await?;
+    let summary = sanitize_user_input_summary(&items);
     let integration_handoff =
-        build_integration_handoff(&sender, receiver_team_id, &timestamp.to_string()).await?;
-    let integration_manifest = integration_handoff
-        .as_ref()
-        .map(render_integration_manifest)
-        .unwrap_or_default();
-    let manifest = format!(
-        "protocol: openspec-artifacts\nrelationship: vertical\nartifact: {}\nstatus: {}\nhandoff: {}\ntape: {}\ngovernance: {}\nglobal_governance: {}{}",
-        display_path(&artifact_path, workspace_root),
-        display_path(&sender.paths.status_path, workspace_root),
-        display_path(&sender.paths.handoff_path, workspace_root),
-        display_path(&sender.paths.tape_path, workspace_root),
-        display_path(&sender.paths.team_doc_path, workspace_root),
-        display_path(&sender.paths.global_doc_path, workspace_root),
-        integration_manifest
-    );
+        build_integration_handoff(&sender, receiver_bundle.as_ref(), &timestamp.to_string())
+            .await?;
     let mut artifact_refs = vec![
         artifact_path,
         sender.paths.status_path.clone(),
@@ -1170,6 +1546,26 @@ async fn prepare_vertical_handoff(
         && let Some(patch_path) = integration.patch_path.as_ref()
     {
         artifact_refs.push(patch_path.clone());
+    }
+    let manifest = render_vertical_manifest(
+        &sender,
+        artifact_refs.as_slice(),
+        integration_handoff.as_ref(),
+        workspace_root,
+    );
+    fs::write(
+        &artifact_refs[0],
+        build_vertical_handoff_markdown(
+            &sender,
+            &summary,
+            artifact_refs.as_slice(),
+            integration_handoff.as_ref(),
+            workspace_root,
+        ),
+    )
+    .await?;
+    for artifact_ref in &artifact_refs {
+        mirror_operator_file(&sender, artifact_ref).await?;
     }
     Ok(PreparedTeamMessage {
         relationship: TeamRelationship::Vertical,
@@ -1185,7 +1581,7 @@ async fn prepare_vertical_handoff(
 
 async fn build_integration_handoff(
     sender: &TeamStateBundle,
-    receiver_team_id: Option<&str>,
+    receiver: Option<&TeamStateBundle>,
     timestamp: &str,
 ) -> io::Result<Option<TeamIntegrationHandoff>> {
     let Some(worktree) = sender.record.worktree.as_ref() else {
@@ -1212,37 +1608,48 @@ async fn build_integration_handoff(
     } else {
         None
     };
-    let target_checkout_path = if let Some(receiver_team_id) = receiver_team_id {
-        load_team_state_bundle(&sender.record.workspace_root, receiver_team_id)
-            .await?
-            .and_then(|bundle| {
-                bundle
-                    .record
-                    .worktree
-                    .map(|worktree| worktree.checkout_path)
-            })
-    } else if let Some(parent_team_id) = sender.record.parent_team_id.as_deref() {
-        load_team_state_bundle(&sender.record.workspace_root, parent_team_id)
-            .await?
-            .and_then(|bundle| {
-                bundle
-                    .record
-                    .worktree
-                    .map(|worktree| worktree.checkout_path)
-            })
-    } else {
-        None
-    };
+    let target_checkout_path = receiver.map(|bundle| {
+        let target_public_id = public_team_ref(
+            &bundle.record.team_id,
+            &bundle.record.role,
+            bundle.record.depth,
+            bundle.record.kind.clone(),
+        );
+        public_worktree_label(
+            &target_public_id,
+            bundle
+                .record
+                .worktree
+                .as_ref()
+                .map(|state| state.managed)
+                .unwrap_or(false),
+        )
+    });
+    let source_public_id = public_team_ref(
+        &sender.record.team_id,
+        &sender.record.role,
+        sender.record.depth,
+        sender.record.kind.clone(),
+    );
 
     Ok(Some(TeamIntegrationHandoff {
-        source_team_id: sender.record.team_id.clone(),
-        target_team_id: receiver_team_id.map(str::to_string),
+        source_team_id: source_public_id.clone(),
+        target_team_id: receiver.map(|bundle| {
+            public_team_ref(
+                &bundle.record.team_id,
+                &bundle.record.role,
+                bundle.record.depth,
+                bundle.record.kind.clone(),
+            )
+        }),
         source_branch: Some(worktree.branch_name.clone()),
-        source_checkout_path: worktree.checkout_path.clone(),
+        source_checkout_path: public_worktree_label(&source_public_id, worktree.managed),
         target_checkout_path,
         base_commit,
         head_commit,
-        patch_path,
+        patch_path: patch_path.as_ref().map(|path| {
+            sanitize_workspace_path(path, &sender.record.workspace_root, "integration.patch")
+        }),
         accepted_modes: vec![
             TeamIntegrationMode::Merge,
             TeamIntegrationMode::CherryPick,
@@ -1310,6 +1717,79 @@ fn render_integration_manifest(integration: &TeamIntegrationHandoff) -> String {
     let base_commit = integration.base_commit.as_deref().unwrap_or("unknown");
     format!(
         "\nintegration_modes: {accepted_modes}\nsource_branch: {source_branch}\nbase_commit: {base_commit}\nhead_commit: {head_commit}{patch_line}"
+    )
+}
+
+fn render_vertical_manifest(
+    sender: &TeamStateBundle,
+    artifact_refs: &[PathBuf],
+    integration: Option<&TeamIntegrationHandoff>,
+    _workspace_root: &Path,
+) -> String {
+    let artifact = artifact_refs
+        .first()
+        .map(|path| operator_visible_path(sender, path))
+        .unwrap_or_else(|| PathBuf::from("handoff.md"));
+    let status = operator_visible_path(sender, &sender.paths.status_path);
+    let handoff = operator_visible_path(sender, &sender.paths.handoff_path);
+    let tape = operator_visible_path(sender, &sender.paths.tape_path);
+    let governance = operator_visible_path(sender, &sender.paths.team_doc_path);
+    let global_governance = operator_visible_path(sender, &sender.paths.global_doc_path);
+    let integration_manifest = integration
+        .as_ref()
+        .map(|handoff| render_integration_manifest(handoff))
+        .unwrap_or_default();
+    format!(
+        "protocol: codex-team-artifacts\nrelationship: vertical\nartifact: {}\nstatus: {}\nhandoff: {}\ntape: {}\ngovernance: {}\nglobal_governance: {}\nnext_action: Review persisted artifacts, then continue the next bounded step.{}",
+        artifact.display(),
+        status.display(),
+        handoff.display(),
+        tape.display(),
+        governance.display(),
+        global_governance.display(),
+        integration_manifest
+    )
+}
+
+fn build_vertical_handoff_markdown(
+    sender: &TeamStateBundle,
+    summary: &str,
+    artifact_refs: &[PathBuf],
+    integration: Option<&TeamIntegrationHandoff>,
+    _workspace_root: &Path,
+) -> String {
+    let declared_outputs = artifact_refs
+        .iter()
+        .map(|path| operator_visible_path(sender, path))
+        .map(|path| format!("- `{}`", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let integration_section = integration
+        .map(|handoff| {
+            format!(
+                "\n## Integration Contract\n- Source team ref: `{}`\n- Target team ref: `{}`\n- Source branch: `{}`\n- Accepted modes: `{}`\n- Head commit: `{}`\n",
+                handoff.source_team_id,
+                handoff.target_team_id.as_deref().unwrap_or("pending-child"),
+                handoff.source_branch.as_deref().unwrap_or("unknown"),
+                handoff
+                    .accepted_modes
+                    .iter()
+                    .map(|mode| match mode {
+                        TeamIntegrationMode::Merge => "merge",
+                        TeamIntegrationMode::CherryPick => "cherry-pick",
+                        TeamIntegrationMode::Patch => "patch",
+                    })
+                    .collect::<Vec<_>>()
+                    .join(","),
+                handoff.head_commit.as_deref().unwrap_or("unknown"),
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "# Codex Vertical Handoff\n\n## Summary\n{}\n\n## Declared Outputs\n{}\n\n## Next Action\n- Review persisted status, governance docs, and artifacts before continuing.\n\n## Blockers\n- None recorded in this handoff.\n\n## Governance Deltas\n- Update `AGENT_TEAM.md` before the next delegation round if review changed local rules.\n{}",
+        sanitize_summary_text(summary),
+        declared_outputs,
+        integration_section
     )
 }
 

@@ -25,6 +25,7 @@ use axum::routing::any;
 use axum::routing::get;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::JSONRPCMessage;
+use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use futures::SinkExt;
 use futures::StreamExt;
@@ -603,6 +604,19 @@ fn should_skip_notification_for_connection(
         return true;
     }
 
+    if !connection_state
+        .experimental_api_enabled
+        .load(Ordering::Acquire)
+        && matches!(
+            message,
+            OutgoingMessage::AppServerNotification(ServerNotification::TeamWorkflowSessionUpdated(
+                _
+            ))
+        )
+    {
+        return true;
+    }
+
     let Ok(opted_out_notification_methods) = connection_state.opted_out_notification_methods.read()
     else {
         warn!("failed to read outbound opted-out notifications");
@@ -1039,6 +1053,65 @@ mod tests {
         assert!(
             writer_rx.try_recv().is_err(),
             "legacy notifications should not reach external clients"
+        );
+    }
+
+    #[tokio::test]
+    async fn team_workflow_notifications_require_experimental_opt_in() {
+        let connection_id = ConnectionId(12);
+        let (writer_tx, mut writer_rx) = mpsc::channel(1);
+
+        let mut connections = HashMap::new();
+        connections.insert(
+            connection_id,
+            OutboundConnectionState::new(
+                writer_tx,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(RwLock::new(HashSet::new())),
+                false,
+                None,
+            ),
+        );
+
+        route_outgoing_envelope(
+            &mut connections,
+            OutgoingEnvelope::ToConnection {
+                connection_id,
+                message: OutgoingMessage::AppServerNotification(
+                    ServerNotification::TeamWorkflowSessionUpdated(
+                        codex_app_server_protocol::TeamWorkflowSessionUpdatedNotification {
+                            session: codex_app_server_protocol::TeamWorkflowSession {
+                                root_thread_id: "root-thread".to_string(),
+                                root_team_id: "root-scheduler".to_string(),
+                                root_role: "root-scheduler".to_string(),
+                                current_phase: codex_app_server_protocol::TeamWorkflowPhase::Review,
+                                max_depth: 5,
+                                active_team_count: 1,
+                                blocked_team_count: 0,
+                                stale_resource_count: 0,
+                                memory_provider:
+                                    codex_app_server_protocol::TeamWorkflowMemoryProvider {
+                                        mode: codex_app_server_protocol::TeamWorkflowMemoryProviderMode::Local,
+                                        health: codex_app_server_protocol::TeamWorkflowMemoryProviderHealth::Ready,
+                                    },
+                                global_governance_path: PathBuf::from(".codex/AGENT.md"),
+                                team_state_index_path: PathBuf::from(
+                                    ".codex/team-state/index.json",
+                                ),
+                                teams: Vec::new(),
+                                updated_at: "2026-03-18T00:00:00Z".to_string(),
+                            },
+                        },
+                    ),
+                ),
+            },
+        )
+        .await;
+
+        assert!(
+            writer_rx.try_recv().is_err(),
+            "team workflow notifications should be suppressed without experimental opt-in"
         );
     }
 

@@ -1,3 +1,11 @@
+use super::config::{
+    TEAM_DIRNAME, TEAM_STATE_DIRNAME, TeamMemoryProviderMode, resolve_team_home_root,
+};
+use super::memory::TeamMemoryProviderHealth;
+use super::memory::TeamMemoryProviderStatus;
+use super::redaction::public_team_ref;
+use super::redaction::public_worktree_label;
+use super::redaction::sanitize_workspace_path;
 use super::state::{
     TeamIntegrationHandoff, TeamIntegrationMode, TeamKind, TeamManagedResource,
     TeamManagedResourceKind, TeamManagedResourceStatus, TeamPhase, TeamTapeEntry, TeamTapeKind,
@@ -10,6 +18,9 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use tokio::fs;
+use tracing::warn;
+
+const TEAM_OPS_DIRNAME: &str = "team-ops";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TeamWorkflowThreadVisibility {
@@ -69,6 +80,26 @@ pub enum TeamWorkflowPublicIntegrationMode {
     Merge,
     CherryPick,
     Patch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamWorkflowPublicMemoryProviderMode {
+    Local,
+    Tape,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamWorkflowPublicMemoryProviderHealth {
+    Ready,
+    Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamWorkflowPublicMemoryProvider {
+    pub mode: TeamWorkflowPublicMemoryProviderMode,
+    pub health: TeamWorkflowPublicMemoryProviderHealth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,7 +164,7 @@ pub struct TeamWorkflowPublicTapeEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamWorkflowPublicTeam {
     pub team_id: String,
-    pub thread_id: ThreadId,
+    pub thread_id: String,
     pub parent_team_id: Option<String>,
     pub depth: i32,
     pub kind: TeamWorkflowPublicTeamKind,
@@ -163,6 +194,7 @@ pub struct TeamWorkflowPublicSession {
     pub active_team_count: usize,
     pub blocked_team_count: usize,
     pub stale_resource_count: usize,
+    pub memory_provider: TeamWorkflowPublicMemoryProvider,
     pub global_governance_path: PathBuf,
     pub team_state_index_path: PathBuf,
     pub teams: Vec<TeamWorkflowPublicTeam>,
@@ -212,7 +244,12 @@ pub async fn load_public_team_workflow_session(
             continue;
         };
         pending.extend(bundle.record.child_team_ids.iter().rev().cloned());
-        teams.push(public_team_from_bundle(&bundle, recent_tape_limit).await?);
+        match public_team_from_bundle(&bundle, recent_tape_limit).await {
+            Ok(team) => teams.push(team),
+            Err(err) => {
+                warn!(team_id = %bundle.record.team_id, "failed to shape public team workflow state: {err}");
+            }
+        }
     }
     teams.sort_by(|left, right| {
         left.depth
@@ -230,15 +267,26 @@ pub async fn load_public_team_workflow_session(
         .sum();
     Ok(Some(TeamWorkflowPublicSession {
         root_thread_id: root_bundle.record.thread_id,
-        root_team_id: root_bundle.record.team_id.clone(),
+        root_team_id: public_team_ref(
+            &root_bundle.record.team_id,
+            &root_bundle.record.role,
+            root_bundle.record.depth,
+            root_bundle.record.kind.clone(),
+        ),
         root_role: root_bundle.record.role.clone(),
         current_phase: map_phase(&root_bundle.status.current_phase),
         max_depth: root_bundle.record.max_depth,
         active_team_count: teams.len(),
         blocked_team_count,
         stale_resource_count,
-        global_governance_path: root_bundle.paths.global_doc_path.clone(),
-        team_state_index_path: root_bundle.paths.index_path.clone(),
+        memory_provider: map_memory_provider(&root_bundle.status.memory_provider),
+        global_governance_path: operator_visible_path(
+            &root_bundle,
+            &root_bundle.paths.global_doc_path,
+        ),
+        team_state_index_path: PathBuf::from(".codex")
+            .join(TEAM_OPS_DIRNAME)
+            .join("index.json"),
         teams,
         updated_at: root_bundle.status.updated_at.clone(),
     }))
@@ -265,10 +313,52 @@ async fn public_team_from_bundle(
     bundle: &super::state::TeamStateBundle,
     recent_tape_limit: usize,
 ) -> io::Result<TeamWorkflowPublicTeam> {
+    let team_id = public_team_ref(
+        &bundle.record.team_id,
+        &bundle.record.role,
+        bundle.record.depth,
+        bundle.record.kind.clone(),
+    );
+    let parent_team_id = match bundle.record.parent_team_id.as_deref() {
+        Some(parent_team_id) => {
+            load_team_state_bundle(&bundle.record.workspace_root, parent_team_id)
+                .await?
+                .map(|parent| {
+                    public_team_ref(
+                        &parent.record.team_id,
+                        &parent.record.role,
+                        parent.record.depth,
+                        parent.record.kind.clone(),
+                    )
+                })
+        }
+        None => None,
+    };
+    let mut active_child_team_ids = Vec::new();
+    for child_team_id in &bundle.status.active_child_teams {
+        if let Some(child) =
+            load_team_state_bundle(&bundle.record.workspace_root, child_team_id).await?
+        {
+            active_child_team_ids.push(public_team_ref(
+                &child.record.team_id,
+                &child.record.role,
+                child.record.depth,
+                child.record.kind.clone(),
+            ));
+        }
+    }
+    let mut produced_artifacts = Vec::with_capacity(bundle.handoff.produced_artifacts.len());
+    for artifact in &bundle.handoff.produced_artifacts {
+        produced_artifacts.push(map_operator_artifact_path(bundle, artifact).await?);
+    }
     Ok(TeamWorkflowPublicTeam {
-        team_id: bundle.record.team_id.clone(),
-        thread_id: bundle.record.thread_id,
-        parent_team_id: bundle.record.parent_team_id.clone(),
+        team_id: team_id.clone(),
+        thread_id: if bundle.record.kind == TeamKind::Root {
+            bundle.record.thread_id.to_string()
+        } else {
+            team_id.clone()
+        },
+        parent_team_id,
         depth: bundle.record.depth,
         kind: map_team_kind(bundle.record.kind.clone()),
         role: bundle.record.role.clone(),
@@ -276,59 +366,80 @@ async fn public_team_from_bundle(
         current_phase: map_phase(&bundle.status.current_phase),
         blockers: bundle.status.blockers.clone(),
         next_steps: bundle.status.next_steps.clone(),
-        active_child_team_ids: bundle.status.active_child_teams.clone(),
-        governance_doc_path: bundle.paths.team_doc_path.clone(),
-        global_governance_path: bundle.paths.global_doc_path.clone(),
-        produced_artifacts: bundle.handoff.produced_artifacts.clone(),
-        worktree: bundle.record.worktree.as_ref().map(map_worktree),
-        environment: map_environment(&bundle.status.environment),
+        active_child_team_ids,
+        governance_doc_path: operator_visible_path(bundle, &bundle.paths.team_doc_path),
+        global_governance_path: operator_visible_path(bundle, &bundle.paths.global_doc_path),
+        produced_artifacts,
+        worktree: bundle
+            .record
+            .worktree
+            .as_ref()
+            .map(|worktree| map_worktree(bundle, worktree)),
+        environment: map_environment(bundle, &team_id, &bundle.status.environment),
         integration: bundle.handoff.integration.as_ref().map(map_integration),
-        recent_tape: load_public_tape_entries(&bundle.paths.tape_path, recent_tape_limit).await?,
+        recent_tape: load_public_tape_entries(bundle, recent_tape_limit).await?,
         updated_at: bundle.status.updated_at.clone(),
     })
 }
 
 async fn load_public_tape_entries(
-    tape_path: &Path,
+    bundle: &super::state::TeamStateBundle,
     recent_tape_limit: usize,
 ) -> io::Result<Vec<TeamWorkflowPublicTapeEntry>> {
-    let contents = match fs::read_to_string(tape_path).await {
+    let contents = match fs::read_to_string(&bundle.paths.tape_path).await {
         Ok(contents) => contents,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(err),
     };
-    let mut entries = contents
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str::<TeamTapeEntry>(line)
-                .map(redact_tape_entry)
-                .map_err(|err| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("failed to parse {}: {err}", tape_path.display()),
-                    )
-                })
-        })
-        .collect::<io::Result<Vec<_>>>()?;
+    let mut entries = Vec::new();
+    for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+        match serde_json::from_str::<TeamTapeEntry>(line) {
+            Ok(entry) => entries.push(redact_tape_entry(bundle, entry).await?),
+            Err(err) => {
+                warn!(
+                    tape_path = %bundle.paths.tape_path.display(),
+                    "failed to parse team tape entry; suppressing unsafe entry: {err}"
+                );
+            }
+        }
+    }
     if recent_tape_limit > 0 && entries.len() > recent_tape_limit {
         entries = entries.split_off(entries.len() - recent_tape_limit);
     }
     Ok(entries)
 }
 
-fn redact_tape_entry(entry: TeamTapeEntry) -> TeamWorkflowPublicTapeEntry {
-    TeamWorkflowPublicTapeEntry {
+async fn redact_tape_entry(
+    bundle: &super::state::TeamStateBundle,
+    entry: TeamTapeEntry,
+) -> io::Result<TeamWorkflowPublicTapeEntry> {
+    let team_id = if entry.team_id == bundle.record.team_id {
+        public_team_ref(
+            &bundle.record.team_id,
+            &bundle.record.role,
+            bundle.record.depth,
+            bundle.record.kind.clone(),
+        )
+    } else {
+        public_team_ref(&entry.team_id, "team", 0, TeamKind::Child)
+    };
+    let mut artifact_refs = Vec::with_capacity(entry.artifact_refs.len());
+    for path in entry.artifact_refs {
+        artifact_refs.push(resolve_operator_visible_path(bundle, &path).await?);
+    }
+    Ok(TeamWorkflowPublicTapeEntry {
         entry_id: entry.entry_id,
-        team_id: entry.team_id,
+        team_id,
         kind: map_tape_kind(entry.kind),
         summary: redact_tape_summary(entry.kind),
-        counterpart_team_id: entry.counterpart_team_id,
+        counterpart_team_id: entry
+            .counterpart_team_id
+            .map(|team_id| public_team_ref(&team_id, "team", 0, TeamKind::Child)),
         phase: entry.phase.as_ref().map(map_phase),
         anchor: entry.anchor,
-        artifact_refs: entry.artifact_refs,
+        artifact_refs,
         created_at: entry.created_at,
-    }
+    })
 }
 
 fn redact_tape_summary(kind: TeamTapeKind) -> String {
@@ -360,13 +471,28 @@ fn map_phase(phase: &TeamPhase) -> TeamWorkflowPublicPhase {
     }
 }
 
-fn map_worktree(worktree: &TeamWorktreeState) -> TeamWorkflowPublicWorktree {
+fn map_worktree(
+    bundle: &super::state::TeamStateBundle,
+    worktree: &TeamWorktreeState,
+) -> TeamWorkflowPublicWorktree {
+    let public_team_id = public_team_ref(
+        &bundle.record.team_id,
+        &bundle.record.role,
+        bundle.record.depth,
+        bundle.record.kind.clone(),
+    );
     TeamWorkflowPublicWorktree {
         branch_name: worktree.branch_name.clone(),
         current_branch: worktree.current_branch.clone(),
-        checkout_path: worktree.checkout_path.clone(),
-        source_checkout_path: worktree.source_checkout_path.clone(),
-        repo_root: worktree.repo_root.clone(),
+        checkout_path: public_worktree_label(&public_team_id, worktree.managed),
+        source_checkout_path: worktree
+            .source_checkout_path
+            .as_ref()
+            .map(|_| PathBuf::from("workspace-root")),
+        repo_root: worktree
+            .repo_root
+            .as_ref()
+            .map(|_| PathBuf::from("workspace-root")),
         base_commit: worktree.base_commit.clone(),
         head_commit: worktree.head_commit.clone(),
         managed: worktree.managed,
@@ -375,25 +501,41 @@ fn map_worktree(worktree: &TeamWorktreeState) -> TeamWorkflowPublicWorktree {
 }
 
 fn map_environment(
+    bundle: &super::state::TeamStateBundle,
+    public_team_id: &str,
     environment: &super::state::TeamEnvironmentState,
 ) -> TeamWorkflowPublicEnvironment {
     TeamWorkflowPublicEnvironment {
         managed_resources: environment
             .managed_resources
             .iter()
-            .map(map_resource)
+            .map(|resource| map_resource(bundle, public_team_id, resource))
             .collect(),
         stale_resources: environment
             .stale_resources
             .iter()
-            .map(map_resource)
+            .map(|resource| map_resource(bundle, public_team_id, resource))
             .collect(),
         cleanup_notes: environment.cleanup_notes.clone(),
         last_cleanup_at: environment.last_cleanup_at.clone(),
     }
 }
 
-fn map_resource(resource: &TeamManagedResource) -> TeamWorkflowPublicResource {
+fn map_resource(
+    bundle: &super::state::TeamStateBundle,
+    public_team_id: &str,
+    resource: &TeamManagedResource,
+) -> TeamWorkflowPublicResource {
+    let path = match resource.kind {
+        TeamManagedResourceKind::Worktree => Some(public_worktree_label(
+            public_team_id,
+            resource.cleanup_required,
+        )),
+        _ => resource
+            .path
+            .as_ref()
+            .map(|path| sanitize_workspace_path(path, &bundle.record.workspace_root, "resource")),
+    };
     TeamWorkflowPublicResource {
         resource_id: resource.resource_id.clone(),
         kind: match resource.kind {
@@ -403,7 +545,7 @@ fn map_resource(resource: &TeamManagedResource) -> TeamWorkflowPublicResource {
             }
             TeamManagedResourceKind::Other => TeamWorkflowPublicResourceKind::Other,
         },
-        path: resource.path.clone(),
+        path,
         status: match resource.status {
             TeamManagedResourceStatus::Active => TeamWorkflowPublicResourceStatus::Active,
             TeamManagedResourceStatus::Stale => TeamWorkflowPublicResourceStatus::Stale,
@@ -436,6 +578,105 @@ fn map_integration(integration: &TeamIntegrationHandoff) -> TeamWorkflowPublicIn
         review_ready: integration.review_ready,
         updated_at: integration.updated_at.clone(),
     }
+}
+
+fn map_memory_provider(status: &TeamMemoryProviderStatus) -> TeamWorkflowPublicMemoryProvider {
+    TeamWorkflowPublicMemoryProvider {
+        mode: match status.mode {
+            TeamMemoryProviderMode::Local => TeamWorkflowPublicMemoryProviderMode::Local,
+            TeamMemoryProviderMode::Tape => TeamWorkflowPublicMemoryProviderMode::Tape,
+        },
+        health: match status.health {
+            TeamMemoryProviderHealth::Ready => TeamWorkflowPublicMemoryProviderHealth::Ready,
+            TeamMemoryProviderHealth::Degraded => TeamWorkflowPublicMemoryProviderHealth::Degraded,
+        },
+    }
+}
+
+fn operator_visible_path(bundle: &super::state::TeamStateBundle, actual_path: &Path) -> PathBuf {
+    let public_team_id = public_team_ref(
+        &bundle.record.team_id,
+        &bundle.record.role,
+        bundle.record.depth,
+        bundle.record.kind.clone(),
+    );
+    let team_root = PathBuf::from(".codex")
+        .join(TEAM_OPS_DIRNAME)
+        .join("teams")
+        .join(public_team_id);
+    if actual_path == bundle.paths.global_doc_path {
+        return PathBuf::from(".codex")
+            .join(TEAM_OPS_DIRNAME)
+            .join("AGENT.md");
+    }
+    if actual_path == bundle.paths.team_doc_path {
+        return team_root.join("AGENT_TEAM.md");
+    }
+    if actual_path == bundle.paths.status_path {
+        return team_root.join("status.json");
+    }
+    if actual_path == bundle.paths.handoff_path {
+        return team_root.join("handoff.json");
+    }
+    if actual_path == bundle.paths.tape_path {
+        return team_root.join("team-tape.jsonl");
+    }
+    if let Ok(relative) = actual_path.strip_prefix(&bundle.paths.artifacts_dir) {
+        return team_root.join("artifacts").join(relative);
+    }
+    sanitize_workspace_path(actual_path, &bundle.record.workspace_root, "artifact")
+}
+
+fn resolve_workspace_path(workspace_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
+    }
+}
+
+async fn owning_bundle_for_path(
+    workspace_root: &Path,
+    actual_path: &Path,
+) -> io::Result<Option<super::state::TeamStateBundle>> {
+    let team_state_root = resolve_team_home_root(workspace_root)
+        .join(TEAM_DIRNAME)
+        .join(TEAM_STATE_DIRNAME);
+    let relative = match actual_path.strip_prefix(&team_state_root) {
+        Ok(relative) => relative,
+        Err(_) => return Ok(None),
+    };
+    let Some(team_id) = relative
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+    else {
+        return Ok(None);
+    };
+    load_team_state_bundle(workspace_root, team_id).await
+}
+
+async fn resolve_operator_visible_path(
+    bundle: &super::state::TeamStateBundle,
+    path: &Path,
+) -> io::Result<PathBuf> {
+    let actual_path = resolve_workspace_path(&bundle.record.workspace_root, path);
+    if let Some(owner_bundle) =
+        owning_bundle_for_path(&bundle.record.workspace_root, &actual_path).await?
+    {
+        return Ok(operator_visible_path(&owner_bundle, &actual_path));
+    }
+    Ok(operator_visible_path(bundle, &actual_path))
+}
+
+async fn map_operator_artifact_path(
+    bundle: &super::state::TeamStateBundle,
+    artifact: &str,
+) -> io::Result<String> {
+    Ok(resolve_operator_visible_path(bundle, Path::new(artifact))
+        .await?
+        .display()
+        .to_string())
 }
 
 fn map_tape_kind(kind: TeamTapeKind) -> TeamWorkflowPublicTapeKind {

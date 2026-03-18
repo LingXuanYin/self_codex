@@ -113,6 +113,9 @@ use codex_app_server_protocol::SkillsRemoteWriteResponse;
 use codex_app_server_protocol::TeamWorkflowEnvironment;
 use codex_app_server_protocol::TeamWorkflowIntegration;
 use codex_app_server_protocol::TeamWorkflowIntegrationMode;
+use codex_app_server_protocol::TeamWorkflowMemoryProvider;
+use codex_app_server_protocol::TeamWorkflowMemoryProviderHealth;
+use codex_app_server_protocol::TeamWorkflowMemoryProviderMode;
 use codex_app_server_protocol::TeamWorkflowPhase;
 use codex_app_server_protocol::TeamWorkflowResource;
 use codex_app_server_protocol::TeamWorkflowResourceKind;
@@ -256,6 +259,9 @@ use codex_core::state_db::reconcile_rollout;
 use codex_core::team_api::TeamWorkflowPublicEnvironment as CoreTeamWorkflowEnvironment;
 use codex_core::team_api::TeamWorkflowPublicIntegration as CoreTeamWorkflowIntegration;
 use codex_core::team_api::TeamWorkflowPublicIntegrationMode as CoreTeamWorkflowIntegrationMode;
+use codex_core::team_api::TeamWorkflowPublicMemoryProvider as CoreTeamWorkflowMemoryProvider;
+use codex_core::team_api::TeamWorkflowPublicMemoryProviderHealth as CoreTeamWorkflowMemoryProviderHealth;
+use codex_core::team_api::TeamWorkflowPublicMemoryProviderMode as CoreTeamWorkflowPublicMemoryProviderMode;
 use codex_core::team_api::TeamWorkflowPublicPhase as CoreTeamWorkflowPhase;
 use codex_core::team_api::TeamWorkflowPublicResource as CoreTeamWorkflowResource;
 use codex_core::team_api::TeamWorkflowPublicResourceKind as CoreTeamWorkflowResourceKind;
@@ -3150,10 +3156,13 @@ impl CodexMessageProcessor {
             match self.team_visibility_for_summary(&summary).await {
                 Ok(TeamWorkflowThreadVisibility::HiddenChild { .. }) => continue,
                 Ok(_) => {}
-                Err(err) => warn!(
-                    thread_id = %summary.conversation_id,
-                    "failed to evaluate team visibility during thread/list: {err}"
-                ),
+                Err(err) => {
+                    warn!(
+                        thread_id = %summary.conversation_id,
+                        "failed to evaluate team visibility during thread/list; suppressing thread: {err}"
+                    );
+                    continue;
+                }
             }
             let conversation_id = summary.conversation_id;
             thread_ids.insert(conversation_id);
@@ -3208,8 +3217,7 @@ impl CodexMessageProcessor {
                 Ok(TeamWorkflowThreadVisibility::HiddenChild { .. }) => continue,
                 Ok(_) => data.push(thread_id.to_string()),
                 Err(err) => {
-                    warn!(%thread_id, "failed to evaluate team visibility during thread/loaded/list: {err}");
-                    data.push(thread_id.to_string());
+                    warn!(%thread_id, "failed to evaluate team visibility during thread/loaded/list; suppressing thread: {err}");
                 }
             }
         }
@@ -6017,7 +6025,9 @@ impl CodexMessageProcessor {
                 }
             };
             let auth = self.auth_manager.auth().await;
-            if let Err(err) = plugins_manager.sync_plugins_from_remote(&config, auth.as_ref()).await
+            if let Err(err) = plugins_manager
+                .sync_plugins_from_remote(&config, auth.as_ref())
+                .await
             {
                 self.send_internal_error(
                     request_id,
@@ -6186,7 +6196,9 @@ impl CodexMessageProcessor {
                 }
             };
             let auth = self.auth_manager.auth().await;
-            if let Err(err) = plugins_manager.sync_plugins_from_remote(&config, auth.as_ref()).await
+            if let Err(err) = plugins_manager
+                .sync_plugins_from_remote(&config, auth.as_ref())
+                .await
             {
                 self.send_internal_error(
                     request_id,
@@ -8691,6 +8703,7 @@ fn map_team_workflow_session(session: CoreTeamWorkflowSession) -> TeamWorkflowSe
         active_team_count: session.active_team_count,
         blocked_team_count: session.blocked_team_count,
         stale_resource_count: session.stale_resource_count,
+        memory_provider: map_team_workflow_memory_provider(session.memory_provider),
         global_governance_path: session.global_governance_path,
         team_state_index_path: session.team_state_index_path,
         teams: session
@@ -8847,6 +8860,25 @@ fn map_team_workflow_tape_entry(entry: CoreTeamWorkflowTapeEntry) -> TeamWorkflo
     }
 }
 
+fn map_team_workflow_memory_provider(
+    provider: CoreTeamWorkflowMemoryProvider,
+) -> TeamWorkflowMemoryProvider {
+    TeamWorkflowMemoryProvider {
+        mode: match provider.mode {
+            CoreTeamWorkflowPublicMemoryProviderMode::Local => {
+                TeamWorkflowMemoryProviderMode::Local
+            }
+            CoreTeamWorkflowPublicMemoryProviderMode::Tape => TeamWorkflowMemoryProviderMode::Tape,
+        },
+        health: match provider.health {
+            CoreTeamWorkflowMemoryProviderHealth::Ready => TeamWorkflowMemoryProviderHealth::Ready,
+            CoreTeamWorkflowMemoryProviderHealth::Degraded => {
+                TeamWorkflowMemoryProviderHealth::Degraded
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8966,11 +8998,15 @@ mod tests {
             active_team_count: 2,
             blocked_team_count: 1,
             stale_resource_count: 1,
+            memory_provider: codex_core::team_api::TeamWorkflowPublicMemoryProvider {
+                mode: codex_core::team_api::TeamWorkflowPublicMemoryProviderMode::Local,
+                health: codex_core::team_api::TeamWorkflowPublicMemoryProviderHealth::Ready,
+            },
             global_governance_path: PathBuf::from(".codex/AGENT.md"),
             team_state_index_path: PathBuf::from(".codex/team-state/index.json"),
             teams: vec![TeamWorkflowPublicTeam {
                 team_id: "child-team".to_string(),
-                thread_id: ThreadId::new(),
+                thread_id: "team-d1-development-lead-12345678".to_string(),
                 parent_team_id: Some("root-team".to_string()),
                 depth: 1,
                 kind: TeamWorkflowPublicTeamKind::Child,
@@ -9010,6 +9046,10 @@ mod tests {
         assert_eq!(session.current_phase, TeamWorkflowPhase::Review);
         assert_eq!(session.active_team_count, 2);
         assert_eq!(session.teams.len(), 1);
+        assert_eq!(
+            session.memory_provider.mode,
+            TeamWorkflowMemoryProviderMode::Local
+        );
         assert_eq!(
             session.teams[0].produced_artifacts,
             vec!["artifacts/handoff.md"]

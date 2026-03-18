@@ -1,5 +1,7 @@
 use super::GLOBAL_AGENT_DOC_FILENAME;
 use super::TEAM_AGENT_DOC_FILENAME;
+use super::TeamWorkflowPublicMemoryProviderHealth;
+use super::TeamWorkflowPublicMemoryProviderMode;
 use super::TeamWorkflowPublicTapeKind;
 use super::TeamWorkflowThreadVisibility;
 use super::config::TeamWorkflowConfig;
@@ -147,6 +149,33 @@ async fn root_team_initialization_persists_state_and_governance_docs() {
             .join(TEAM_INDEX_FILENAME)
             .exists()
     );
+    assert!(
+        temp_dir
+            .path()
+            .join(".codex")
+            .join("team-governance")
+            .join("prompts")
+            .join("scheduler.md")
+            .exists()
+    );
+    assert!(
+        temp_dir
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("team-delegation")
+            .join("SKILL.md")
+            .exists()
+    );
+    let root_doc = tokio::fs::read_to_string(
+        temp_dir
+            .path()
+            .join(".codex")
+            .join(GLOBAL_AGENT_DOC_FILENAME),
+    )
+    .await
+    .expect("read root agent doc");
+    assert!(root_doc.contains(".codex/team-governance/prompts/scheduler.md"));
     let tape = tokio::fs::read_to_string(team_dir.join(TEAM_TAPE_FILENAME))
         .await
         .expect("read team tape");
@@ -401,6 +430,7 @@ async fn child_to_parent_handoff_includes_reviewable_integration_metadata() {
     assert!(manifest.contains("integration_modes: merge,cherry-pick,patch"));
     assert!(manifest.contains("source_branch:"));
     assert!(manifest.contains("patch:"));
+    assert!(!manifest.contains(&child_thread_id.to_string()));
     let integration = prepared
         .integration_handoff
         .expect("integration handoff should be recorded");
@@ -491,6 +521,11 @@ async fn public_team_session_redacts_child_context_but_keeps_artifacts_and_statu
     )
     .await
     .expect("prepare handoff");
+    let handoff_doc = tokio::fs::read_to_string(&prepared.artifact_refs[0])
+        .await
+        .expect("read sanitized handoff");
+    assert!(!handoff_doc.contains("private implementation details"));
+    assert!(!handoff_doc.contains(&child_thread_id.to_string()));
     record_team_message_delivery(temp_dir.path(), child_thread_id, root_thread_id, &prepared)
         .await
         .expect("record handoff");
@@ -508,8 +543,17 @@ async fn public_team_session_redacts_child_context_but_keeps_artifacts_and_statu
     let child_team = session
         .teams
         .iter()
-        .find(|team| team.thread_id == child_thread_id)
+        .find(|team| team.kind == super::TeamWorkflowPublicTeamKind::Child)
         .expect("child team present in redacted session");
+    assert_ne!(child_team.thread_id, child_thread_id.to_string());
+    assert_eq!(
+        session.memory_provider.mode,
+        TeamWorkflowPublicMemoryProviderMode::Local
+    );
+    assert_eq!(
+        session.memory_provider.health,
+        TeamWorkflowPublicMemoryProviderHealth::Ready
+    );
     assert_eq!(
         child_team.produced_artifacts.len(),
         prepared.artifact_refs.len()
@@ -527,5 +571,34 @@ async fn public_team_session_redacts_child_context_but_keeps_artifacts_and_statu
             .iter()
             .any(|entry| entry.kind == TeamWorkflowPublicTapeKind::Bootstrap),
         "bootstrap tape should still be visible"
+    );
+}
+
+#[tokio::test]
+async fn configured_tape_provider_surfaces_degraded_status_without_blocking_runtime() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    write_workflow(
+        &temp_dir,
+        "version: 1\nmemoryProvider:\n  mode: tape\n  tape:\n    endpoint: http://127.0.0.1:9/team-memory\n",
+    )
+    .await;
+    let root_thread_id = ThreadId::new();
+
+    maybe_initialize_for_thread(temp_dir.path(), root_thread_id, &SessionSource::Exec, None)
+        .await
+        .expect("initialize root team with tape provider");
+
+    let session = load_public_team_workflow_session(temp_dir.path(), root_thread_id, 8)
+        .await
+        .expect("load public session")
+        .expect("session exists");
+
+    assert_eq!(
+        session.memory_provider.mode,
+        TeamWorkflowPublicMemoryProviderMode::Tape
+    );
+    assert_eq!(
+        session.memory_provider.health,
+        TeamWorkflowPublicMemoryProviderHealth::Degraded
     );
 }

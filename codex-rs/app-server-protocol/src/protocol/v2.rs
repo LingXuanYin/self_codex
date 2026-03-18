@@ -3123,6 +3123,30 @@ pub enum TeamWorkflowIntegrationMode {
     Patch,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum TeamWorkflowMemoryProviderMode {
+    Local,
+    Tape,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum TeamWorkflowMemoryProviderHealth {
+    Ready,
+    Degraded,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamWorkflowMemoryProvider {
+    pub mode: TeamWorkflowMemoryProviderMode,
+    pub health: TeamWorkflowMemoryProviderHealth,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -3229,6 +3253,7 @@ pub struct TeamWorkflowSession {
     pub active_team_count: usize,
     pub blocked_team_count: usize,
     pub stale_resource_count: usize,
+    pub memory_provider: TeamWorkflowMemoryProvider,
     pub global_governance_path: PathBuf,
     pub team_state_index_path: PathBuf,
     pub teams: Vec<TeamWorkflowTeam>,

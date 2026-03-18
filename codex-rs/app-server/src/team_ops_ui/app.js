@@ -57,46 +57,14 @@ function isAbsolutePath(path) {
   return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("/") || path.startsWith("\\\\");
 }
 
-function dirname(path) {
-  if (!path) {
-    return "";
-  }
-  const normalized = path.replace(/[\\/]+$/, "");
-  const separator = normalized.includes("\\") ? "\\" : "/";
-  const index = normalized.lastIndexOf(separator);
-  if (index <= 0) {
-    return normalized;
-  }
-  return normalized.slice(0, index);
-}
-
-function joinPath(base, relative) {
-  if (!base) {
-    return relative;
-  }
-  const separator = base.includes("\\") ? "\\" : "/";
-  const cleanBase = base.replace(/[\\/]+$/, "");
-  const cleanRelative = relative.replace(/^[\\/]+/, "");
-  return `${cleanBase}${separator}${cleanRelative}`;
-}
-
-function workspaceRoot() {
-  const indexPath = state.session?.teamStateIndexPath;
-  if (!indexPath || !isAbsolutePath(indexPath)) {
-    return null;
-  }
-  return dirname(dirname(dirname(indexPath)));
-}
-
 function resolveReadablePath(path) {
   if (!path) {
     return null;
   }
   if (isAbsolutePath(path)) {
-    return path;
+    return null;
   }
-  const root = workspaceRoot();
-  return root ? joinPath(root, path) : null;
+  return path;
 }
 
 function escapeHtml(value) {
@@ -317,6 +285,11 @@ function renderOverview() {
     metricCard("Teams", String(state.session.activeTeamCount)),
     metricCard("Blocked", String(state.session.blockedTeamCount)),
     metricCard("Stale Resources", String(state.session.staleResourceCount)),
+    metricCard(
+      "Memory",
+      state.session.memoryProvider?.mode || "unknown",
+      state.session.memoryProvider?.health || "",
+    ),
     metricCard("Max Depth", String(state.session.maxDepth)),
   ].join("");
 }

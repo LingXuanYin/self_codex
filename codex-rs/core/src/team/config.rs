@@ -33,6 +33,8 @@ pub(crate) struct TeamWorkflowConfig {
     #[serde(default)]
     pub artifact_policy: ArtifactPolicyConfig,
     #[serde(default)]
+    pub memory_provider: TeamMemoryProviderConfig,
+    #[serde(default)]
     pub team_templates: Vec<TeamTemplateConfig>,
     #[serde(default = "default_team_max_depth", alias = "max-depth")]
     pub max_depth: i32,
@@ -47,6 +49,7 @@ impl Default for TeamWorkflowConfig {
             workflow_loop: WorkflowLoopConfig::default(),
             governance: GovernanceConfig::default(),
             artifact_policy: ArtifactPolicyConfig::default(),
+            memory_provider: TeamMemoryProviderConfig::default(),
             team_templates: Vec::new(),
             max_depth: DEFAULT_TEAM_MAX_DEPTH,
         }
@@ -202,6 +205,42 @@ pub(crate) struct TeamTemplateConfig {
     pub default_mode: Option<ExecutionMode>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TeamMemoryProviderMode {
+    #[default]
+    Local,
+    Tape,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TeamMemoryProviderConfig {
+    #[serde(default)]
+    pub mode: TeamMemoryProviderMode,
+    #[serde(default)]
+    pub tape: Option<TeamTapeProviderConfig>,
+}
+
+impl Default for TeamMemoryProviderConfig {
+    fn default() -> Self {
+        Self {
+            mode: TeamMemoryProviderMode::Local,
+            tape: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TeamTapeProviderConfig {
+    pub endpoint: String,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
 impl TeamWorkflowConfig {
     pub(crate) fn validate(&self) -> io::Result<()> {
         if self.version != DEFAULT_WORKFLOW_VERSION {
@@ -290,6 +329,21 @@ impl TeamWorkflowConfig {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("teamTemplates contains a duplicate id: {id}"),
+                ));
+            }
+        }
+
+        if self.memory_provider.mode == TeamMemoryProviderMode::Tape {
+            let Some(tape) = self.memory_provider.tape.as_ref() else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "memoryProvider.tape must be configured when memoryProvider.mode is tape",
+                ));
+            };
+            if tape.endpoint.trim().is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "memoryProvider.tape.endpoint must not be empty when tape mode is enabled",
                 ));
             }
         }

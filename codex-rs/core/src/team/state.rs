@@ -8,6 +8,10 @@ use super::config::TEAM_DIRNAME;
 use super::config::TEAM_STATE_DIRNAME;
 use super::config::TeamWorkflowConfig;
 use super::config::resolve_team_home_root;
+use super::memory::TeamMemoryProviderStatus;
+use super::memory::mirror_entry_to_provider;
+use super::redaction::sanitize_summary_text;
+use super::redaction::sanitize_workspace_paths;
 use chrono::Utc;
 use codex_protocol::ThreadId;
 use serde::Deserialize;
@@ -142,6 +146,7 @@ pub(crate) struct TeamStatusSnapshot {
     pub cycle: TeamCycleSnapshot,
     pub same_level_context_protocol: SameLevelContextProtocol,
     pub cross_level_handoff: CrossLevelHandoffPolicy,
+    pub memory_provider: TeamMemoryProviderStatus,
     pub governance_docs: Vec<PathBuf>,
     pub active_child_teams: Vec<String>,
     pub worktree: Option<TeamWorktreeState>,
@@ -447,6 +452,7 @@ pub(crate) async fn persist_team_state(
         cycle: default_cycle_snapshot(&workflow.workflow_loop.required_roles, &now),
         same_level_context_protocol: workflow.artifact_policy.same_level_context_protocol,
         cross_level_handoff: workflow.artifact_policy.cross_level_handoff,
+        memory_provider: TeamMemoryProviderStatus::for_config(&workflow.memory_provider),
         governance_docs: vec![paths.global_doc_path.clone(), paths.team_doc_path.clone()],
         active_child_teams: record.child_team_ids.clone(),
         worktree: record.worktree.clone(),
@@ -466,6 +472,7 @@ pub(crate) async fn persist_team_state(
     status.required_roles = workflow.workflow_loop.required_roles.clone();
     status.same_level_context_protocol = workflow.artifact_policy.same_level_context_protocol;
     status.cross_level_handoff = workflow.artifact_policy.cross_level_handoff;
+    status.memory_provider = TeamMemoryProviderStatus::for_config(&workflow.memory_provider);
     status.governance_docs = vec![paths.global_doc_path.clone(), paths.team_doc_path.clone()];
     status.active_child_teams = record.child_team_ids.clone();
     status.worktree = record.worktree.clone();
@@ -676,15 +683,20 @@ pub(crate) async fn append_team_tape_entry(
         ));
     };
     ensure_tape_file(&bundle.paths.tape_path).await?;
+    let summary = summary.into();
     let entry = TeamTapeEntry {
         entry_id: Uuid::new_v4().to_string(),
         team_id: bundle.record.team_id.clone(),
         kind,
-        summary: summary.into(),
+        summary: sanitize_summary_text(&summary),
         counterpart_team_id,
         phase: Some(bundle.status.current_phase.clone()),
         anchor,
-        artifact_refs,
+        artifact_refs: sanitize_workspace_paths(
+            &artifact_refs,
+            &bundle.record.workspace_root,
+            "redacted-artifact",
+        ),
         created_at: Utc::now().to_rfc3339(),
     };
     let line = serde_json::to_string(&entry).map_err(io::Error::other)?;
@@ -697,6 +709,19 @@ pub(crate) async fn append_team_tape_entry(
     existing.push_str(&line);
     existing.push('\n');
     fs::write(&bundle.paths.tape_path, existing).await?;
+    if let Some(workflow) =
+        super::config::load_workflow_from_workspace(&bundle.record.workspace_root).await?
+    {
+        let mut status_bundle = bundle.clone();
+        status_bundle.status.memory_provider = mirror_entry_to_provider(
+            &status_bundle.record.workspace_root,
+            &workflow.memory_provider,
+            &entry,
+        )
+        .await?;
+        status_bundle.status.updated_at = Utc::now().to_rfc3339();
+        write_team_state_bundle(&status_bundle).await?;
+    }
     Ok(entry)
 }
 
