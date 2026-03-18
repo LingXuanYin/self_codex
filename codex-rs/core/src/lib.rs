@@ -132,6 +132,9 @@ pub mod team_api {
     pub use crate::team::TeamWorkflowPublicEnvironment;
     pub use crate::team::TeamWorkflowPublicIntegration;
     pub use crate::team::TeamWorkflowPublicIntegrationMode;
+    pub use crate::team::TeamWorkflowPublicMemoryProvider;
+    pub use crate::team::TeamWorkflowPublicMemoryProviderHealth;
+    pub use crate::team::TeamWorkflowPublicMemoryProviderMode;
     pub use crate::team::TeamWorkflowPublicPhase;
     pub use crate::team::TeamWorkflowPublicResource;
     pub use crate::team::TeamWorkflowPublicResourceKind;
