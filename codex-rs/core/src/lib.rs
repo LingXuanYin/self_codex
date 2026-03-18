@@ -130,8 +130,11 @@ pub mod spawn;
 pub mod state_db;
 pub mod team_api {
     pub use crate::team::TeamWorkflowPublicEnvironment;
+    pub use crate::team::TeamWorkflowPublicHandoff;
     pub use crate::team::TeamWorkflowPublicIntegration;
     pub use crate::team::TeamWorkflowPublicIntegrationMode;
+    pub use crate::team::TeamWorkflowPublicLifecycle;
+    pub use crate::team::TeamWorkflowPublicLifecycleState;
     pub use crate::team::TeamWorkflowPublicMemoryProvider;
     pub use crate::team::TeamWorkflowPublicMemoryProviderHealth;
     pub use crate::team::TeamWorkflowPublicMemoryProviderMode;
@@ -139,6 +142,7 @@ pub mod team_api {
     pub use crate::team::TeamWorkflowPublicResource;
     pub use crate::team::TeamWorkflowPublicResourceKind;
     pub use crate::team::TeamWorkflowPublicResourceStatus;
+    pub use crate::team::TeamWorkflowPublicRootAgent;
     pub use crate::team::TeamWorkflowPublicSession;
     pub use crate::team::TeamWorkflowPublicTapeEntry;
     pub use crate::team::TeamWorkflowPublicTapeKind;
