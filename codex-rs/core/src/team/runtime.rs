@@ -1389,11 +1389,26 @@ fn operator_visible_path(bundle: &TeamStateBundle, actual_path: &Path) -> PathBu
         .join(actual_path.file_name().unwrap_or_default())
 }
 
-fn resolve_workspace_path(workspace_root: &Path, path: &Path) -> PathBuf {
+fn resolve_workspace_path(workspace_root: &Path, path: &Path) -> Option<PathBuf> {
     if path.is_absolute() {
-        path.to_path_buf()
+        match path.strip_prefix(workspace_root) {
+            Ok(relative) => {
+                let sanitized = sanitize_workspace_path(path, workspace_root, "");
+                if sanitized.as_os_str().is_empty() || sanitized != relative {
+                    None
+                } else {
+                    Some(path.to_path_buf())
+                }
+            }
+            Err(_) => None,
+        }
     } else {
-        workspace_root.join(path)
+        let sanitized = sanitize_workspace_path(&workspace_root.join(path), workspace_root, "");
+        if sanitized.as_os_str().is_empty() {
+            None
+        } else {
+            Some(workspace_root.join(sanitized))
+        }
     }
 }
 
@@ -1422,7 +1437,12 @@ async fn operator_visible_path_for_workspace(
     bundle: &TeamStateBundle,
     path: &Path,
 ) -> io::Result<PathBuf> {
-    let actual_path = resolve_workspace_path(&bundle.record.workspace_root, path);
+    let Some(actual_path) = resolve_workspace_path(&bundle.record.workspace_root, path) else {
+        return Ok(operator_visible_path(
+            bundle,
+            &bundle.paths.artifacts_dir.join("redacted-artifact"),
+        ));
+    };
     if let Some(owner_bundle) =
         owning_bundle_for_path(&bundle.record.workspace_root, &actual_path).await?
     {
@@ -1432,7 +1452,10 @@ async fn operator_visible_path_for_workspace(
 }
 
 async fn mirror_operator_file(bundle: &TeamStateBundle, actual_path: &Path) -> io::Result<()> {
-    let actual_path = resolve_workspace_path(&bundle.record.workspace_root, actual_path);
+    let Some(actual_path) = resolve_workspace_path(&bundle.record.workspace_root, actual_path)
+    else {
+        return Ok(());
+    };
     if !fs::try_exists(&actual_path).await.unwrap_or(false) {
         return Ok(());
     }

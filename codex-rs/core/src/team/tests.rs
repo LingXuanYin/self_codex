@@ -8,6 +8,8 @@ use super::config::TeamWorkflowConfig;
 use super::config::load_workflow_from_workspace;
 use super::load_public_team_workflow_session;
 use super::record_team_compact_checkpoint;
+use super::redaction::sanitize_summary_for_export;
+use super::redaction::sanitize_workspace_path;
 use super::runtime::maybe_initialize_for_thread;
 use super::runtime::prepare_team_message;
 use super::runtime::record_team_message_delivery;
@@ -23,7 +25,6 @@ use super::state::TeamPhase;
 use super::state::load_team_state_bundle;
 use super::state::write_team_state_bundle;
 use super::team_workflow_thread_visibility;
-use super::redaction::sanitize_summary_for_export;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -99,6 +100,14 @@ fn sanitize_summary_for_export_scrubs_json_escaped_workspace_root() {
     assert!(!scrubbed.contains(r"C:\root\proj"));
     assert!(!scrubbed.contains(r"C:\\root\\proj"));
     assert!(scrubbed.contains("workspace-root"));
+}
+
+#[test]
+fn sanitize_workspace_path_rejects_parent_traversal() {
+    let workspace_root = PathBuf::from(r"C:\root\proj");
+    let traversing = workspace_root.join(r"..\secret.txt");
+    let sanitized = sanitize_workspace_path(&traversing, &workspace_root, "redacted-artifact");
+    assert_eq!(sanitized, PathBuf::from("redacted-artifact"));
 }
 
 #[tokio::test]
@@ -701,6 +710,83 @@ async fn sibling_peer_messages_require_structured_a2a_and_persist_peer_shape() {
     assert_eq!(last_entry["kind"], "peer_sync");
     assert_eq!(last_entry["peer_message"]["protocol"], "codex-a2a");
     assert_eq!(last_entry["peer_message"]["intent"], "align");
+}
+
+#[tokio::test]
+async fn sibling_a2a_artifact_refs_reject_parent_traversal() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    write_workflow(&temp_dir, "version: 1\n").await;
+    let root_thread_id = ThreadId::new();
+    let design_thread_id = ThreadId::new();
+    let development_thread_id = ThreadId::new();
+
+    maybe_initialize_for_thread(temp_dir.path(), root_thread_id, &SessionSource::Exec, None)
+        .await
+        .expect("initialize root team");
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        design_thread_id,
+        &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: root_thread_id,
+            depth: 1,
+            agent_nickname: Some("Ada".to_string()),
+            agent_role: Some("design-lead".to_string()),
+        }),
+        None,
+    )
+    .await
+    .expect("initialize design team");
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        development_thread_id,
+        &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: root_thread_id,
+            depth: 1,
+            agent_nickname: Some("Linus".to_string()),
+            agent_role: Some("development-lead".to_string()),
+        }),
+        None,
+    )
+    .await
+    .expect("initialize development team");
+
+    let prepared = prepare_team_message(
+        temp_dir.path(),
+        design_thread_id,
+        development_thread_id,
+        vec![UserInput::Text {
+            text: "protocol: codex-a2a\nintent: align\nphase: design\nsummary: bounded artifact sync\nartifact_refs:\n- ..\\\\secret.txt\nreply_needed: true".to_string(),
+            text_elements: Vec::new(),
+        }],
+    )
+    .await
+    .expect("prepare a2a payload");
+
+    let envelope = prepared.a2a_envelope.as_ref().expect("a2a envelope");
+    assert_eq!(
+        envelope.artifact_refs,
+        vec![PathBuf::from("redacted-artifact")]
+    );
+
+    record_team_message_delivery(
+        temp_dir.path(),
+        design_thread_id,
+        development_thread_id,
+        &prepared,
+    )
+    .await
+    .expect("record delivery");
+
+    let tape = std::fs::read_to_string(
+        temp_dir
+            .path()
+            .join(".codex")
+            .join("team-state")
+            .join(design_thread_id.to_string())
+            .join(TEAM_TAPE_FILENAME),
+    )
+    .expect("read tape");
+    assert!(!tape.contains("..\\\\secret.txt"));
 }
 
 #[tokio::test]

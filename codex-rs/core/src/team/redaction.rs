@@ -2,6 +2,7 @@ use super::state::TeamKind;
 use codex_protocol::user_input::UserInput;
 use sha2::Digest;
 use sha2::Sha256;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -109,7 +110,23 @@ pub(crate) fn sanitize_workspace_path(
     fallback: &str,
 ) -> PathBuf {
     match path.strip_prefix(workspace_root) {
-        Ok(relative) => relative.to_path_buf(),
+        Ok(relative) => {
+            let mut sanitized = PathBuf::new();
+            for component in relative.components() {
+                match component {
+                    Component::CurDir => {}
+                    Component::Normal(segment) => sanitized.push(segment),
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                        return PathBuf::from(fallback);
+                    }
+                }
+            }
+            if sanitized.as_os_str().is_empty() {
+                PathBuf::from(fallback)
+            } else {
+                sanitized
+            }
+        }
         Err(_) => PathBuf::from(fallback),
     }
 }
