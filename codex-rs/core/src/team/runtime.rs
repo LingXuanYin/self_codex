@@ -4,8 +4,8 @@ use super::config::{
     load_workflow_from_workspace, resolve_team_home_root, workflow_path,
 };
 use super::redaction::{
-    public_team_ref, public_worktree_label, sanitize_summary_text, sanitize_user_input_summary,
-    sanitize_workspace_path, vertical_receiver_label,
+    public_team_ref, public_worktree_label, sanitize_summary_text,
+    sanitize_user_input_summary_for_export, sanitize_workspace_path, vertical_receiver_label,
 };
 use super::state::{
     TeamA2aEnvelope, TeamA2aIntent, TeamA2aRelationship, TeamAuditEntry, TeamAuditKind,
@@ -386,6 +386,7 @@ fn has_atomic_checkpoint(sender: &TeamStateBundle, prepared: &PreparedTeamMessag
     let required = [
         &sender.paths.status_path,
         &sender.paths.handoff_path,
+        &sender.paths.tape_path,
         &sender.paths.global_doc_path,
         &sender.paths.team_doc_path,
     ];
@@ -426,6 +427,7 @@ fn record_policy_failure(
         artifact_refs: vec![
             sender.paths.status_path.clone(),
             sender.paths.handoff_path.clone(),
+            sender.paths.tape_path.clone(),
             sender.paths.global_doc_path.clone(),
             sender.paths.team_doc_path.clone(),
         ],
@@ -441,6 +443,7 @@ fn ensure_resume_artifacts(bundle: &TeamStateBundle) -> io::Result<()> {
     for path in [
         &bundle.paths.status_path,
         &bundle.paths.handoff_path,
+        &bundle.paths.tape_path,
         &bundle.paths.global_doc_path,
         &bundle.paths.team_doc_path,
     ] {
@@ -2122,7 +2125,7 @@ async fn prepare_vertical_handoff(
     if let Some(parent) = artifact_path.parent() {
         fs::create_dir_all(parent).await?;
     }
-    let summary = sanitize_user_input_summary(&items);
+    let summary = sanitize_user_input_summary_for_export(&items, workspace_root);
     let integration_handoff =
         build_integration_handoff(&sender, receiver_bundle.as_ref(), &timestamp.to_string())
             .await?;

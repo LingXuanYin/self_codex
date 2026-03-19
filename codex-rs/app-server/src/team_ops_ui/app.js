@@ -57,14 +57,73 @@ function isAbsolutePath(path) {
   return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("/") || path.startsWith("\\\\");
 }
 
+function normalizePathSeparators(path) {
+  return String(path || "").replaceAll("\\", "/");
+}
+
+function hasParentTraversal(path) {
+  return normalizePathSeparators(path)
+    .split("/")
+    .filter(Boolean)
+    .some((segment) => segment === "..");
+}
+
+function isAllowedReadableRelativePath(path) {
+  const normalized = normalizePathSeparators(path).replace(/^\.?\//, "");
+  const candidate = normalized.startsWith(".codex/") ? normalized : `./${normalized}`;
+  return (
+    candidate === ".codex/AGENT.md" ||
+    candidate.startsWith(".codex/team-ops/") ||
+    candidate.startsWith(".codex/team-governance/")
+  );
+}
+
+function workspaceRelativePath(path) {
+  const workspaceRoot = state.thread?.cwd;
+  if (!workspaceRoot) {
+    return null;
+  }
+  const normalizedWorkspace = normalizePathSeparators(workspaceRoot)
+    .replace(/\/+$/, "")
+    .toLowerCase();
+  const normalizedPath = normalizePathSeparators(path).replace(/\/+/g, "/");
+  const normalizedPathLower = normalizedPath.toLowerCase();
+  if (normalizedPathLower === normalizedWorkspace) {
+    return "";
+  }
+  if (!normalizedPathLower.startsWith(`${normalizedWorkspace}/`)) {
+    return null;
+  }
+  return normalizedPath.slice(normalizedWorkspace.length + 1);
+}
+
+function joinWorkspacePath(relativePath) {
+  const workspaceRoot = state.thread?.cwd;
+  if (!workspaceRoot) {
+    return null;
+  }
+  const cleaned = String(relativePath || "").replace(/^([\\/])+/, "");
+  return /[\\/]$/.test(workspaceRoot) ? `${workspaceRoot}${cleaned}` : `${workspaceRoot}\\${cleaned}`;
+}
+
 function resolveReadablePath(path) {
   if (!path) {
     return null;
   }
-  if (isAbsolutePath(path)) {
+  if (hasParentTraversal(path)) {
     return null;
   }
-  return path;
+  if (isAbsolutePath(path)) {
+    const relativePath = workspaceRelativePath(path);
+    if (!relativePath || hasParentTraversal(relativePath) || !isAllowedReadableRelativePath(relativePath)) {
+      return null;
+    }
+    return path;
+  }
+  if (!isAllowedReadableRelativePath(path)) {
+    return null;
+  }
+  return joinWorkspacePath(path);
 }
 
 function escapeHtml(value) {

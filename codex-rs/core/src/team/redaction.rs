@@ -71,6 +71,31 @@ pub(crate) fn sanitize_user_input_summary(items: &[UserInput]) -> String {
     }
 }
 
+pub(crate) fn sanitize_user_input_summary_for_export(
+    items: &[UserInput],
+    workspace_root: &Path,
+) -> String {
+    let mut parts = Vec::new();
+    for item in items {
+        let part = match item {
+            UserInput::Text { text, .. } => sanitize_summary_for_export(text, workspace_root),
+            UserInput::Mention { name, .. } => format!("mention `{name}` included"),
+            UserInput::Skill { name, .. } => format!("skill `{name}` referenced"),
+            UserInput::LocalImage { .. } => "local image supplied".to_string(),
+            UserInput::Image { .. } => "image supplied".to_string(),
+            _ => "structured input supplied".to_string(),
+        };
+        if !part.is_empty() {
+            parts.push(part);
+        }
+    }
+    if parts.is_empty() {
+        "Sanitized artifact handoff.".to_string()
+    } else {
+        sanitize_summary_text(parts.join(" | ").as_str())
+    }
+}
+
 pub(crate) fn sanitize_workspace_path(
     path: &Path,
     workspace_root: &Path,

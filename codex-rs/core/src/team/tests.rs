@@ -735,6 +735,8 @@ async fn vertical_handoff_allows_json_payload_without_a2a_protocol() {
     write_workflow(&temp_dir, "version: 1\n").await;
     let root_thread_id = ThreadId::new();
     let child_thread_id = ThreadId::new();
+    let workspace_root = temp_dir.path().display().to_string();
+    let escaped_workspace_root = workspace_root.replace('\\', "\\\\").replace('"', "\\\"");
 
     maybe_initialize_for_thread(temp_dir.path(), root_thread_id, &SessionSource::Exec, None)
         .await
@@ -758,7 +760,10 @@ async fn vertical_handoff_allows_json_payload_without_a2a_protocol() {
         child_thread_id,
         root_thread_id,
         vec![UserInput::Text {
-            text: "{\"summary\":\"user intent: fix auth timeout\",\"details\":{\"intent\":\"fix auth timeout\"}}".to_string(),
+            text: format!(
+                "{{\"summary\":\"handoff from {} about auth timeout\",\"details\":{{\"intent\":\"fix auth timeout\"}}}}",
+                escaped_workspace_root
+            ),
             text_elements: Vec::new(),
         }],
     )
@@ -770,6 +775,21 @@ async fn vertical_handoff_allows_json_payload_without_a2a_protocol() {
     assert!(
         !prepared.summary.contains(&child_thread_id.to_string()),
         "vertical handoff summary should remain sanitized"
+    );
+    assert!(
+        !prepared.summary.contains(&workspace_root),
+        "vertical handoff summary should not expose the workspace root"
+    );
+    assert!(
+        prepared.summary.contains("workspace-root"),
+        "vertical handoff summary should redact the workspace root"
+    );
+    let handoff_doc = tokio::fs::read_to_string(&prepared.artifact_refs[0])
+        .await
+        .expect("read sanitized handoff");
+    assert!(
+        !handoff_doc.contains(&workspace_root),
+        "vertical handoff artifact should not expose the workspace root"
     );
 }
 
@@ -887,11 +907,12 @@ async fn compact_checkpoint_and_resume_enforce_artifact_first_recovery() {
         vec!["checkpoint blocker"]
     );
 
-    tokio::fs::remove_file(&compacted_bundle.paths.status_path)
+    tokio::fs::remove_file(&compacted_bundle.paths.tape_path)
         .await
-        .expect("remove status");
+        .expect("remove tape");
     let resume_err = record_team_resume(temp_dir.path(), &root_thread_id.to_string())
         .await
         .expect_err("resume should require persisted artifacts");
     assert!(resume_err.to_string().contains("resumeFromArtifacts"));
+    assert!(resume_err.to_string().contains(TEAM_TAPE_FILENAME));
 }
