@@ -83,15 +83,15 @@ function workspaceRelativePath(path) {
   if (!workspaceRoot) {
     return null;
   }
-  const normalizedWorkspace = normalizePathSeparators(workspaceRoot)
-    .replace(/\/+$/, "")
-    .toLowerCase();
+  const windowsLike = /^[A-Za-z]:[\\/]/.test(workspaceRoot) || String(workspaceRoot).startsWith("\\\\");
+  const normalizedWorkspace = normalizePathSeparators(workspaceRoot).replace(/\/+$/, "");
   const normalizedPath = normalizePathSeparators(path).replace(/\/+/g, "/");
-  const normalizedPathLower = normalizedPath.toLowerCase();
-  if (normalizedPathLower === normalizedWorkspace) {
+  const workspaceForCompare = windowsLike ? normalizedWorkspace.toLowerCase() : normalizedWorkspace;
+  const pathForCompare = windowsLike ? normalizedPath.toLowerCase() : normalizedPath;
+  if (pathForCompare === workspaceForCompare) {
     return "";
   }
-  if (!normalizedPathLower.startsWith(`${normalizedWorkspace}/`)) {
+  if (!pathForCompare.startsWith(`${workspaceForCompare}/`)) {
     return null;
   }
   return normalizedPath.slice(normalizedWorkspace.length + 1);
@@ -102,8 +102,9 @@ function joinWorkspacePath(relativePath) {
   if (!workspaceRoot) {
     return null;
   }
-  const cleaned = String(relativePath || "").replace(/^([\\/])+/, "");
-  return /[\\/]$/.test(workspaceRoot) ? `${workspaceRoot}${cleaned}` : `${workspaceRoot}\\${cleaned}`;
+  const cleaned = normalizePathSeparators(relativePath).replace(/^\/+/, "");
+  const normalizedWorkspace = normalizePathSeparators(workspaceRoot).replace(/\/+$/, "");
+  return `${normalizedWorkspace}/${cleaned}`;
 }
 
 function resolveReadablePath(path) {

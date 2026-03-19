@@ -23,12 +23,14 @@ use super::state::TeamPhase;
 use super::state::load_team_state_bundle;
 use super::state::write_team_state_bundle;
 use super::team_workflow_thread_visibility;
+use super::redaction::sanitize_summary_for_export;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
 use serde_json::Value;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -87,6 +89,16 @@ async fn workflow_loader_applies_default_depth_and_roles() {
         workflow.workflow_loop.required_roles,
         TeamWorkflowConfig::default().workflow_loop.required_roles
     );
+}
+
+#[test]
+fn sanitize_summary_for_export_scrubs_json_escaped_workspace_root() {
+    let workspace_root = PathBuf::from(r"C:\root\proj");
+    let input = r#"handoff path: C:\\root\\proj\\src\\main.rs (and also C:\root\proj)"#;
+    let scrubbed = sanitize_summary_for_export(input, &workspace_root);
+    assert!(!scrubbed.contains(r"C:\root\proj"));
+    assert!(!scrubbed.contains(r"C:\\root\\proj"));
+    assert!(scrubbed.contains("workspace-root"));
 }
 
 #[tokio::test]

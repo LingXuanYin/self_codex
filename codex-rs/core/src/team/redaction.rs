@@ -42,8 +42,15 @@ pub(crate) fn sanitize_summary_for_export(text: &str, workspace_root: &Path) -> 
     let workspace_backslash = workspace_display.replace('/', "\\");
     let mut scrubbed = text.to_string();
     for candidate in [workspace_display, workspace_forward, workspace_backslash] {
-        if !candidate.is_empty() {
-            scrubbed = scrubbed.replace(candidate.as_str(), "workspace-root");
+        if candidate.is_empty() {
+            continue;
+        }
+        // Also scrub JSON-escaped Windows style paths (e.g. `C:\\root\\proj`).
+        let escaped = candidate.replace('\\', "\\\\");
+        for needle in [candidate, escaped] {
+            if !needle.is_empty() {
+                scrubbed = scrubbed.replace(needle.as_str(), "workspace-root");
+            }
         }
     }
     sanitize_summary_text(&scrubbed)
