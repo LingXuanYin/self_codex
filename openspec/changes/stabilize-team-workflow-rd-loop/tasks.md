@@ -39,3 +39,14 @@
 - The current atomic gate still treats `prepared.artifact_refs.first()` as the handoff manifest; that ordering contract is acceptable for this slice but should be made more explicit or typed in a follow-on batch.
 - Legacy generated skill files are repaired by prepending valid frontmatter and preserving old content under a legacy marker. That closes the current loader failure without yet performing a structured migration of stale legacy guidance.
 - Full `cargo test -p codex-core` is still not the Windows completion gate for this batch; targeted validation remains the accepted boundary.
+
+## 4. Spawn Failure Cleanup
+
+- [ ] 4.1 Audit `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs` and `codex-rs/core/src/team/runtime.rs` to identify which prepared spawn-handoff files are created before child-thread creation succeeds
+- [ ] 4.2 Update the spawn failure path so failed `spawn_agent` attempts clean up any newly created spawn manifest and mirrored operator artifact instead of leaving a ghost handoff behind
+- [ ] 4.3 Add or update focused tests in `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` that force a team-workflow `spawn_agent` failure after preparation and assert no fresh spawn handoff artifact survives
+
+## 5. Validation And Review For Spawn Failure Cleanup
+
+- [ ] 5.1 Run the relevant Windows-local targeted `codex-core` validation commands for the touched `multi_agents` and `team` paths using the documented root-level virtual environment
+- [ ] 5.2 Record the validation outcomes, cleanup status, and residual review findings for the spawn failure cleanup slice before taking the next batch
