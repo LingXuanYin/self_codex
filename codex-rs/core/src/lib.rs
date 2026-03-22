@@ -153,7 +153,6 @@ pub mod team_api {
     pub use crate::team::load_public_team_workflow_session;
     pub use crate::team::team_workflow_thread_visibility;
 }
-pub mod terminal;
 mod tools;
 pub mod turn_diff_tracker;
 mod turn_metadata;

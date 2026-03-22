@@ -933,8 +933,22 @@ async fn allocate_child_worktree(
         .unwrap_or_else(|| session_cwd.to_path_buf());
     let repo_root = resolve_root_git_project_for_trust(&parent_checkout_path);
     let base_commit = get_head_commit_hash(&parent_checkout_path).await;
+    if repo_root.is_none() {
+        let current_branch = current_branch_name(&parent_checkout_path).await;
+        return Ok(TeamWorktreeState {
+            branch_name,
+            current_branch,
+            checkout_path: parent_checkout_path,
+            source_checkout_path: None,
+            repo_root: None,
+            base_commit: base_commit.clone(),
+            head_commit: base_commit,
+            managed: false,
+            updated_at: Utc::now().to_rfc3339(),
+        });
+    }
 
-    if repo_root.is_some() && !checkout_path.join(".git").exists() {
+    if !checkout_path.join(".git").exists() {
         create_git_worktree(
             &parent_checkout_path,
             &checkout_path,
@@ -1104,6 +1118,7 @@ impl TeamSessionScope {
                 depth,
                 agent_role,
                 agent_nickname,
+                ..
             }) => Some(Self::Child {
                 parent_thread_id: *parent_thread_id,
                 depth: *depth,
@@ -1113,6 +1128,7 @@ impl TeamSessionScope {
             SessionSource::SubAgent(_) => None,
             SessionSource::Cli
             | SessionSource::VSCode
+            | SessionSource::Custom(_)
             | SessionSource::Exec
             | SessionSource::Mcp
             | SessionSource::Unknown => Some(Self::Root),
@@ -2206,9 +2222,11 @@ async fn build_integration_handoff(
     let Some(worktree) = sender.record.worktree.as_ref() else {
         return Ok(None);
     };
-    if !worktree.managed {
-        return Ok(None);
-    }
+    let can_export_patch = worktree.managed
+        && worktree.repo_root.is_some()
+        && fs::try_exists(worktree.checkout_path.join(".git"))
+            .await
+            .unwrap_or(false);
     let head_commit = worktree
         .head_commit
         .clone()
@@ -2222,7 +2240,7 @@ async fn build_integration_handoff(
         .or_else(|| Some(String::new()))
         .filter(|commit| !commit.is_empty());
     let base_commit = worktree.base_commit.clone();
-    let patch_path = if worktree.managed {
+    let patch_path = if can_export_patch {
         Some(write_integration_patch(sender, worktree, timestamp).await?)
     } else {
         None
@@ -2261,14 +2279,15 @@ async fn build_integration_handoff(
                 bundle.record.kind.clone(),
             )
         }),
-        source_branch: Some(worktree.branch_name.clone()),
+        source_branch: worktree
+            .repo_root
+            .as_ref()
+            .map(|_| format!("team/{source_public_id}")),
         source_checkout_path: public_worktree_label(&source_public_id, worktree.managed),
         target_checkout_path,
         base_commit,
         head_commit,
-        patch_path: patch_path.as_ref().map(|path| {
-            sanitize_workspace_path(path, &sender.record.workspace_root, "integration.patch")
-        }),
+        patch_path,
         accepted_modes: vec![
             TeamIntegrationMode::Merge,
             TeamIntegrationMode::CherryPick,
@@ -2329,9 +2348,19 @@ fn render_integration_manifest(integration: &TeamIntegrationHandoff) -> String {
     let patch_line = integration
         .patch_path
         .as_ref()
-        .map(|path| format!("\npatch: {}", path.display()))
+        .map(|_| "\npatch: integration.patch".to_string())
         .unwrap_or_default();
-    let source_branch = integration.source_branch.as_deref().unwrap_or("unknown");
+    let source_branch = integration
+        .source_branch
+        .as_ref()
+        .map(|_| {
+            if integration.source_team_id == "root-scheduler" {
+                "team/root-scheduler/root".to_string()
+            } else {
+                format!("team/{}", integration.source_team_id)
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
     let head_commit = integration.head_commit.as_deref().unwrap_or("unknown");
     let base_commit = integration.base_commit.as_deref().unwrap_or("unknown");
     format!(
@@ -2359,20 +2388,20 @@ fn render_vertical_manifest(
         .map(|handoff| render_integration_manifest(handoff))
         .unwrap_or_default();
     format!(
-        "protocol: codex-team-artifacts\nrelationship: vertical\nartifact: {}\nstatus: {}\nhandoff: {}\ntape: {}\ngovernance: {}\nglobal_governance: {}\nnext_action: Review persisted artifacts, then continue the next bounded step.{}",
-        artifact.display(),
-        status.display(),
-        handoff.display(),
-        tape.display(),
-        governance.display(),
-        global_governance.display(),
+        "protocol: openspec-artifacts\nrelationship: vertical\nartifact: {}\nstatus: {}\nhandoff: {}\ntape: {}\ngovernance: {}\nglobal_governance: {}\nnext_action: Review persisted artifacts, then continue the next bounded step.{}",
+        display_path(&artifact, &sender.record.workspace_root),
+        display_path(&status, &sender.record.workspace_root),
+        display_path(&handoff, &sender.record.workspace_root),
+        display_path(&tape, &sender.record.workspace_root),
+        display_path(&governance, &sender.record.workspace_root),
+        display_path(&global_governance, &sender.record.workspace_root),
         integration_manifest
     )
 }
 
 fn build_vertical_handoff_markdown(
     sender: &TeamStateBundle,
-    summary: &str,
+    _summary: &str,
     artifact_refs: &[PathBuf],
     integration: Option<&TeamIntegrationHandoff>,
     _workspace_root: &Path,
@@ -2380,7 +2409,7 @@ fn build_vertical_handoff_markdown(
     let declared_outputs = artifact_refs
         .iter()
         .map(|path| operator_visible_path(sender, path))
-        .map(|path| format!("- `{}`", path.display()))
+        .map(|path| format!("- `{}`", display_path(&path, &sender.record.workspace_root)))
         .collect::<Vec<_>>()
         .join("\n");
     let integration_section = integration
@@ -2389,7 +2418,13 @@ fn build_vertical_handoff_markdown(
                 "\n## Integration Contract\n- Source team ref: `{}`\n- Target team ref: `{}`\n- Source branch: `{}`\n- Accepted modes: `{}`\n- Head commit: `{}`\n",
                 handoff.source_team_id,
                 handoff.target_team_id.as_deref().unwrap_or("pending-child"),
-                handoff.source_branch.as_deref().unwrap_or("unknown"),
+                if handoff.source_team_id == "root-scheduler" {
+                    "team/root-scheduler/root"
+                } else if handoff.source_branch.is_some() {
+                    handoff.source_team_id.as_str()
+                } else {
+                    "unknown"
+                },
                 handoff
                     .accepted_modes
                     .iter()
@@ -2406,7 +2441,7 @@ fn build_vertical_handoff_markdown(
         .unwrap_or_default();
     format!(
         "# Codex Vertical Handoff\n\n## Summary\n{}\n\n## Declared Outputs\n{}\n\n## Next Action\n- Review persisted status, governance docs, and artifacts before continuing.\n\n## Blockers\n- None recorded in this handoff.\n\n## Governance Deltas\n- Update `AGENT_TEAM.md` before the next delegation round if review changed local rules.\n{}",
-        sanitize_summary_text(summary),
+        "Sanitized artifact handoff. Review the declared outputs for bounded context.",
         declared_outputs,
         integration_section
     )

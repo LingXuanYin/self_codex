@@ -268,7 +268,7 @@ pub async fn team_workflow_thread_visibility(
 pub async fn load_public_team_workflow_session(
     workspace_root: &Path,
     thread_id: ThreadId,
-    recent_tape_limit: usize,
+    _recent_tape_limit: usize,
 ) -> io::Result<Option<TeamWorkflowPublicSession>> {
     let Some(bundle) = load_team_state_bundle(workspace_root, &thread_id.to_string()).await? else {
         return Ok(None);

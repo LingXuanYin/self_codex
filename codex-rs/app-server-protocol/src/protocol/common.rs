@@ -1725,6 +1725,10 @@ mod tests {
                         "activeTeamCount": 2,
                         "blockedTeamCount": 1,
                         "staleResourceCount": 1,
+                        "memoryProvider": {
+                            "mode": "local",
+                            "health": "ready"
+                        },
                         "globalGovernancePath": absolute_path_string(".codex/AGENT.md"),
                         "teamStateIndexPath": absolute_path_string(".codex/team-ops/index.json"),
                         "updatedAt": "2026-03-17T00:00:00Z"

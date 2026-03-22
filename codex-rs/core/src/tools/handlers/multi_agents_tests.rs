@@ -659,7 +659,7 @@ async fn spawn_agent_uses_artifact_manifest_for_team_workflow_child_handoff() {
         .expect("spawn should succeed");
     let (content, _) = expect_text_output(output);
     let result: SpawnAgentResult = serde_json::from_str(&content).expect("spawn result");
-    let agent_id = agent_id(&result.agent_id).expect("valid agent id");
+    let agent_id = parse_agent_id(&result.agent_id);
 
     let captured = manager
         .captured_ops()
@@ -716,7 +716,7 @@ async fn spawn_agent_switches_child_thread_to_team_worktree() {
         .expect("spawn should succeed");
     let (content, _) = expect_text_output(output);
     let result: SpawnAgentResult = serde_json::from_str(&content).expect("spawn result");
-    let agent_id = agent_id(&result.agent_id).expect("valid agent id");
+    let agent_id = parse_agent_id(&result.agent_id);
 
     let snapshot = manager
         .get_thread(agent_id)
@@ -904,7 +904,7 @@ async fn send_input_accepts_structured_items() {
 }
 
 #[tokio::test]
-async fn send_input_keeps_raw_context_for_sibling_teams() {
+async fn send_input_renders_a2a_manifest_for_sibling_teams() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -917,6 +917,7 @@ async fn send_input_keeps_raw_context_for_sibling_teams() {
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: None,
             agent_role: Some("design-lead".to_string()),
         }),
@@ -935,6 +936,7 @@ async fn send_input_keeps_raw_context_for_sibling_teams() {
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: None,
             agent_role: Some("development-lead".to_string()),
         }),
@@ -949,6 +951,7 @@ async fn send_input_keeps_raw_context_for_sibling_teams() {
     turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id,
         depth: 1,
+        agent_path: None,
         agent_nickname: None,
         agent_role: Some("design-lead".to_string()),
     });
@@ -957,9 +960,10 @@ async fn send_input_keeps_raw_context_for_sibling_teams() {
         Arc::new(session),
         Arc::new(turn),
         "send_input",
-        function_payload(
-            json!({"id": thread.thread_id.to_string(), "message": "align the interface"}),
-        ),
+        function_payload(json!({
+            "target": thread.thread_id.to_string(),
+            "message": "protocol: codex-a2a\nintent: align\nphase: design\nsummary: Align the interface surface and keep the payload bounded.\nartifact_refs:\n- docs/interface.md\nreply_needed: true"
+        })),
     );
     SendInputHandler
         .handle(invocation)
@@ -974,10 +978,12 @@ async fn send_input_keeps_raw_context_for_sibling_teams() {
             _ => None,
         })
         .expect("receiver input should be captured");
-    match &captured[0] {
-        UserInput::Text { text, .. } => assert_eq!(text, "align the interface"),
-        other => panic!("expected raw sibling text, got {other:?}"),
-    }
+    let text = match &captured[0] {
+        UserInput::Text { text, .. } => text.as_str(),
+        other => panic!("expected rendered a2a text, got {other:?}"),
+    };
+    assert!(text.contains("protocol: codex-a2a"));
+    assert!(text.contains("intent: align"));
 }
 
 #[tokio::test]
@@ -987,43 +993,51 @@ async fn send_input_converts_vertical_team_message_into_artifact_manifest() {
     session.services.agent_control = manager.agent_control();
     let temp_dir = tempfile::tempdir().expect("tempdir");
     write_team_workflow(temp_dir.path());
-    maybe_initialize_for_thread(
-        temp_dir.path(),
-        session.conversation_id,
-        &SessionSource::Exec,
-        None,
-    )
-    .await
-    .expect("initialize sender team");
     let config = turn.config.as_ref().clone();
     let thread = manager
         .start_thread(config)
         .await
-        .expect("start child thread");
+        .expect("start parent thread");
     maybe_initialize_for_thread(
         temp_dir.path(),
         thread.thread_id,
+        &SessionSource::Exec,
+        None,
+    )
+    .await
+    .expect("initialize parent team");
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        session.conversation_id,
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id: session.conversation_id,
+            parent_thread_id: thread.thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: None,
             agent_role: Some("review-lead".to_string()),
         }),
         None,
     )
     .await
-    .expect("initialize child team");
+    .expect("initialize sender team");
     let mut turn_config = (*turn.config).clone();
     turn_config.cwd = temp_dir.path().to_path_buf();
     turn.cwd = temp_dir.path().to_path_buf();
     turn.config = Arc::new(turn_config);
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: thread.thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: Some("review-lead".to_string()),
+    });
 
     let invocation = invocation(
         Arc::new(session),
         Arc::new(turn),
         "send_input",
         function_payload(
-            json!({"id": thread.thread_id.to_string(), "message": "review the patch for boundary drift"}),
+            json!({"target": thread.thread_id.to_string(), "message": "review the patch for boundary drift"}),
         ),
     );
     SendInputHandler

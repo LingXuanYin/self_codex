@@ -241,6 +241,7 @@ async fn child_team_initialization_tracks_parent_and_preserves_manual_doc_conten
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: Some("Dirac".to_string()),
             agent_role: Some("review-lead".to_string()),
         }),
@@ -334,6 +335,7 @@ async fn child_team_initialization_allocates_managed_worktree_and_branch_namespa
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: Some("Noether".to_string()),
             agent_role: Some("development-lead".to_string()),
         }),
@@ -408,6 +410,7 @@ async fn child_to_parent_handoff_includes_reviewable_integration_metadata() {
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: Some("Noether".to_string()),
             agent_role: Some("development-lead".to_string()),
         }),
@@ -488,6 +491,7 @@ async fn public_team_visibility_hides_child_threads_but_keeps_root_public() {
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: root_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: Some("Ada".to_string()),
             agent_role: Some("design-lead".to_string()),
         }),
@@ -526,6 +530,7 @@ async fn public_team_session_exposes_root_only_lifecycle_summary() {
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: root_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: Some("Ada".to_string()),
             agent_role: Some("development-lead".to_string()),
         }),
@@ -550,9 +555,11 @@ async fn public_team_session_exposes_root_only_lifecycle_summary() {
         .expect("read sanitized handoff");
     assert!(!handoff_doc.contains("private implementation details"));
     assert!(!handoff_doc.contains(&child_thread_id.to_string()));
-    record_team_message_delivery(temp_dir.path(), child_thread_id, root_thread_id, &prepared)
-        .await
-        .expect("record handoff");
+    let err =
+        record_team_message_delivery(temp_dir.path(), child_thread_id, root_thread_id, &prepared)
+            .await
+            .expect_err("development handoff should require review evidence");
+    assert!(err.to_string().contains("reviewRequired"));
     assert!(
         !prepared.artifact_refs.is_empty(),
         "vertical handoff should persist artifacts"
@@ -581,7 +588,7 @@ async fn public_team_session_exposes_root_only_lifecycle_summary() {
     assert_eq!(session.handoff.active_delegate_count, 1);
     assert_eq!(session.handoff.blocked_delegate_count, 1);
     assert_eq!(session.handoff.awaiting_review_count, 1);
-    assert_eq!(session.handoff.integration_ready_count, 1);
+    assert_eq!(session.handoff.integration_ready_count, 0);
     let session_json = serde_json::to_string(&session).expect("serialize session");
     assert!(!session_json.contains(&child_thread_id.to_string()));
     assert!(!session_json.contains("private implementation details"));
@@ -633,6 +640,7 @@ async fn sibling_peer_messages_require_structured_a2a_and_persist_peer_shape() {
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: root_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: Some("Ada".to_string()),
             agent_role: Some("design-lead".to_string()),
         }),
@@ -646,6 +654,7 @@ async fn sibling_peer_messages_require_structured_a2a_and_persist_peer_shape() {
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: root_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: Some("Linus".to_string()),
             agent_role: Some("development-lead".to_string()),
         }),
@@ -729,6 +738,7 @@ async fn sibling_a2a_artifact_refs_reject_parent_traversal() {
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: root_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: Some("Ada".to_string()),
             agent_role: Some("design-lead".to_string()),
         }),
@@ -742,6 +752,7 @@ async fn sibling_a2a_artifact_refs_reject_parent_traversal() {
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: root_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: Some("Linus".to_string()),
             agent_role: Some("development-lead".to_string()),
         }),
@@ -805,6 +816,7 @@ async fn vertical_a2a_payload_is_rejected_with_artifact_guidance() {
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: root_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: Some("Ada".to_string()),
             agent_role: Some("design-lead".to_string()),
         }),
@@ -845,6 +857,7 @@ async fn vertical_handoff_allows_json_payload_without_a2a_protocol() {
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: root_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: Some("Ada".to_string()),
             agent_role: Some("design-lead".to_string()),
         }),
@@ -908,6 +921,7 @@ async fn development_handoff_requires_review_evidence_before_integration_ready()
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: root_thread_id,
             depth: 1,
+            agent_path: None,
             agent_nickname: Some("Linus".to_string()),
             agent_role: Some("development-lead".to_string()),
         }),

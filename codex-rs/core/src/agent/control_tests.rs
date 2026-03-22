@@ -1082,6 +1082,12 @@ async fn resume_thread_subagent_restores_stored_nickname_and_role() {
     let state_db = child_thread
         .state_db()
         .expect("sqlite state db should be available for nickname resume test");
+    child_thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    child_thread.codex.session.flush_rollout().await;
     timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(Some(metadata)) = state_db.get_thread(child_thread_id).await

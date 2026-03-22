@@ -80,14 +80,7 @@ impl ToolHandler for Handler {
                         .unwrap_or(receiver_agent);
                     true
                 }
-                Err(err) => {
-                    status = session
-                        .services
-                        .agent_control
-                        .get_status(receiver_thread_id)
-                        .await;
-                    return Err(err);
-                }
+                Err(err) => return Err(err),
             }
         } else {
             false

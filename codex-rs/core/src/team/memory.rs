@@ -199,6 +199,7 @@ mod tests {
             &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: root_thread_id,
                 depth: 1,
+                agent_path: None,
                 agent_nickname: Some("Ada".to_string()),
                 agent_role: Some("development-lead".to_string()),
             }),
