@@ -13,7 +13,8 @@ This iteration must start from a document-first workflow because the user explic
 The repository already has a natural technical split:
 
 - governance and recovery policy in `team/config.rs`, `team/state.rs`,
-  `TEAM_ORCHESTRATION.md`, `CURRENT_STAGE.md`, and `LOCAL_DEV_WINDOWS.md`
+  `TEAM-ORCHESTRATION.md`, `CURRENT-STAGE.md`, `LOCAL-DEV.md`, and
+  `IMPLEMENTATION-REVIEW.md`
 - runtime orchestration in `team/runtime.rs`
 - operator/public projection in `team/api.rs`
 - tool-surface enforcement in `tools/handlers/multi_agents/*`
@@ -52,18 +53,16 @@ The repository already has a natural technical split:
   - Rely on chat context alone.
     - Rejected because it fails the compact-recovery requirement.
 
-### Decision: Keep one OpenSpec change with four tightly related capabilities
+### Decision: Keep one OpenSpec change with one cross-cutting capability
 
 - Decision:
-  - Use one change, `stabilize-team-workflow-rd-loop`, with four focused
-    capabilities:
-    - `team-rd-governance`
-    - `team-workflow-governance`
-    - `team-workflow-handoffs`
-    - `team-workflow-hardening`
+  - Use one change, `stabilize-team-workflow-rd-loop`, with one
+    cross-cutting capability, `team-workflow-rd-loop`, that covers
+    governance, recovery, handoffs, and Windows-local validation as one
+    reviewable iteration contract.
 - Why:
-  - Governance, recovery, handoffs, and validation are coupled in
-    implementation but still benefit from separate requirement buckets.
+  - Governance, recovery, handoffs, and validation are coupled in both the
+    user workflow and the implementation seams touched by the current branch.
 - Alternatives considered:
   - Split governance and handoffs into separate changes.
     - Rejected because the same iteration must review the entire design/development/review loop together.
@@ -104,7 +103,7 @@ The repository already has a natural technical split:
 ## Risks / Trade-offs
 
 - [Large runtime hotspot] -> Mitigation: keep new logic out of `team/runtime.rs` unless the behavior truly belongs there; prefer focused helper modules if implementation grows.
-- [Windows shell drift for `just` workflows] -> Mitigation: document exact fallback command patterns and isolate the impact in `LOCAL_DEV_WINDOWS.md`.
+- [Windows shell drift for `just` workflows] -> Mitigation: document exact fallback command patterns and isolate the impact in `LOCAL-DEV.md`.
 - [Spec/doc drift from implementation] -> Mitigation: treat proposal/specs/design/tasks as preconditions for coding and update them before any scope change.
 - [Protocol/runtime mismatch] -> Mitigation: pair core tests with `codex-app-server-protocol` validation and targeted end-to-end checks.
 
@@ -128,3 +127,17 @@ Rollback strategy:
 - Which concrete runtime gaps remain after the latest handoff fixes once we compare current behavior against the new governance specs?
 - How far should this iteration go on repository automation versus code-level enforcement of the document-first workflow?
 - Which end-to-end scenarios are the minimum credible set for Windows in this environment without overfitting to local shell constraints?
+
+## Planning State
+
+- Active mode: `parallel`
+- Current assumptions:
+  - The active branch continues the current `team-workflow` direction.
+  - Windows local development without Docker remains the primary execution path.
+  - `.venv-tools` remains the baseline root-level Python environment unless implementation proves otherwise.
+- Current blockers:
+  - The next code slice still needs to be chosen from the existing runtime and handler gaps.
+  - Some repo recipes remain constrained by POSIX-shell expectations on Windows.
+  - Broad Windows-wide completion criteria remain less trustworthy than targeted test evidence.
+- Next intended step:
+  - Convert this design into a concrete task list, then update `CURRENT-STAGE.md` before implementation begins.
