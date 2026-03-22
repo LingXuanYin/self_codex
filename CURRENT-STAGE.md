@@ -24,18 +24,42 @@ The current product and code direction is to stabilize the `team-workflow` runti
 - Windows local development remains the primary execution environment for this cycle.
 - Existing root-level `.venv-tools` can be reused as the baseline Python environment unless a new requirement forces a separate virtual environment.
 
+## Current Iteration Ownership
+
+- Lead: main Codex thread, responsible for branch ownership, artifact writes, and final integration decisions.
+- Design: sub-agent `Hilbert`, which proposed the first bounded implementation candidates and their acceptance criteria.
+- Development: main Codex thread for the first code batch, with bounded implementation delegation allowed after the design handoff is folded back into docs.
+- Review: `IMPLEMENTATION-REVIEW.md` is the active baseline, and sub-agent `Harvey` supplied the prioritized review brief that selected the first batch gate.
+
+## Selected First Slice
+
+- Slice name: `atomic-checkpoint-existence-enforcement`
+- Intent: make `atomicWorkflows` validate the required checkpoint files by actual file existence, not only by stale `artifact_refs`, so artifact-first recovery cannot be bypassed by deleted or stale checkpoint files.
+- Primary files:
+  - `codex-rs/core/src/team/runtime.rs`
+  - `codex-rs/core/src/team/tests.rs`
+  - `codex-rs/core/src/team/state.rs` for reference and fixture alignment
+- Primary validation:
+  - `codex-rs/core/src/team/tests.rs`
+- Non-goals:
+  - reworking sibling A2A contracts
+  - changing vertical `openspec-artifacts` semantics
+  - changing public session wire shapes in this first batch
+  - broad `team/runtime.rs` refactors
+  - making the full Windows `codex-core` suite the completion gate
+
 ## Current Blockers
 
-- The next bounded implementation slice still needs to be selected from the existing review baseline and task list before coding starts.
 - Root workflow documents have been canonicalized, but older references may still point to compatibility aliases and should be normalized as code work begins.
 - Some repo recipes depend on POSIX shell execution, so local Windows validation must document cargo-first fallbacks where `just` cannot execute.
 - The full `codex-core` suite is not yet treated as a reliable Windows completion gate; targeted validation remains necessary until the next batch tightens that story.
+- The selected slice and review priorities still need to be folded into `IMPLEMENTATION-REVIEW.md`, `design.md`, and `tasks.md` before code changes begin.
 
 ## Next Intended Step
 
-1. Re-read the canonical recovery set for this iteration: `TEAM-ORCHESTRATION.md`, `CURRENT-STAGE.md`, `LOCAL-DEV.md`, and `IMPLEMENTATION-REVIEW.md`.
-2. Re-read the active OpenSpec artifacts under `openspec/changes/stabilize-team-workflow-rd-loop/`.
-3. Choose the first bounded implementation slice from `tasks.md` and assign explicit Design, Development, and Review ownership before any coding starts.
+1. Update `IMPLEMENTATION-REVIEW.md` with the prioritized findings and the first-slice decision.
+2. Update `design.md` and `tasks.md` so they are specific to `atomic-checkpoint-existence-enforcement`.
+3. Start implementation only after those doc updates are committed.
 
 ## Compact Recovery
 
