@@ -521,7 +521,7 @@ async fn redact_tape_entry(
             bundle.record.kind.clone(),
         )
     } else {
-        public_team_ref(&entry.team_id, "team", 0, TeamKind::Child)
+        public_team_ref(&entry.team_id, "team", /*depth*/ 0, TeamKind::Child)
     };
     let mut artifact_refs = Vec::with_capacity(entry.artifact_refs.len());
     for path in entry.artifact_refs {
@@ -534,7 +534,7 @@ async fn redact_tape_entry(
         summary: redact_tape_summary(entry.kind),
         counterpart_team_id: entry
             .counterpart_team_id
-            .map(|team_id| public_team_ref(&team_id, "team", 0, TeamKind::Child)),
+            .map(|team_id| public_team_ref(&team_id, "team", /*depth*/ 0, TeamKind::Child)),
         phase: entry.phase.as_ref().map(map_phase),
         anchor: entry.anchor,
         artifact_refs,

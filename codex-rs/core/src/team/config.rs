@@ -192,6 +192,7 @@ pub(crate) enum SameLevelContextProtocol {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum CrossLevelHandoffPolicy {
     #[default]
+    #[serde(rename = "openspec-artifacts", alias = "open-spec-artifacts")]
     OpenSpecArtifacts,
 }
 

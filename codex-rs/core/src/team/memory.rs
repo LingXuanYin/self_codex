@@ -161,7 +161,7 @@ async fn sanitize_team_ref(workspace_root: &Path, team_id: &str) -> String {
             bundle.record.depth,
             bundle.record.kind.clone(),
         ),
-        _ => public_team_ref(team_id, "team", 0, TeamKind::Child),
+        _ => public_team_ref(team_id, "team", /*depth*/ 0, TeamKind::Child),
     }
 }
 

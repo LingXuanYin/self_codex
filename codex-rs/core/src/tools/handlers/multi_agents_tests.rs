@@ -85,7 +85,7 @@ fn run_git(cwd: &Path, args: &[&str]) {
         .args(args)
         .current_dir(cwd)
         .status()
-        .unwrap_or_else(|err| panic!("git {:?} failed to start: {err}", args));
+        .unwrap_or_else(|err| panic!("git {args:?} failed to start: {err}"));
     assert!(
         status.success(),
         "git {:?} failed in {}",
@@ -306,17 +306,20 @@ async fn multi_agent_v2_spawn_returns_path_and_send_input_accepts_relative_path(
 
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let mut config = (*turn.config).clone();
+    config.cwd = temp_dir.path().to_path_buf();
     let root = manager
-        .start_thread((*turn.config).clone())
+        .start_thread(config.clone())
         .await
         .expect("root thread should start");
     session.services.agent_control = manager.agent_control();
     session.conversation_id = root.thread_id;
-    let mut config = (*turn.config).clone();
     config
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    turn.cwd = temp_dir.path().to_path_buf();
     turn.config = Arc::new(config);
 
     let session = Arc::new(session);
@@ -549,6 +552,11 @@ async fn spawn_agent_rejects_when_depth_limit_exceeded() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let mut config = (*turn.config).clone();
+    config.cwd = temp_dir.path().to_path_buf();
+    turn.cwd = temp_dir.path().to_path_buf();
+    turn.config = Arc::new(config);
 
     let max_depth = turn.config.agent_max_depth;
     turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -1222,6 +1230,11 @@ async fn resume_agent_rejects_when_depth_limit_exceeded() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let mut config = (*turn.config).clone();
+    config.cwd = temp_dir.path().to_path_buf();
+    turn.cwd = temp_dir.path().to_path_buf();
+    turn.config = Arc::new(config);
 
     let max_depth = turn.config.agent_max_depth;
     turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {

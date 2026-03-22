@@ -8,14 +8,15 @@ use super::redaction::{
     sanitize_user_input_summary_for_export, sanitize_workspace_path, vertical_receiver_label,
 };
 use super::state::{
-    TeamA2aEnvelope, TeamA2aIntent, TeamA2aRelationship, TeamAuditEntry, TeamAuditKind,
-    TeamEnvironmentState, TeamIntegrationHandoff, TeamIntegrationMode, TeamKind,
-    TeamManagedResource, TeamManagedResourceKind, TeamManagedResourceStatus, TeamPhase,
-    TeamStateBundle, TeamStatePaths, TeamStateRecord, TeamStateWriteRequest, TeamTapeEntry,
-    TeamTapeKind, TeamWorktreeState, append_team_tape_entry, apply_role_assignment,
-    indicates_replan, infer_iteration_role, load_team_state_bundle, load_team_worktree,
-    mark_cycle_artifact_handoff, mark_cycle_replan, persist_team_state,
-    update_team_environment_state, update_team_worktree, write_team_state_bundle,
+    TEAM_HANDOFF_FILENAME, TEAM_STATUS_FILENAME, TEAM_TAPE_FILENAME, TeamA2aEnvelope,
+    TeamA2aIntent, TeamA2aRelationship, TeamAuditEntry, TeamAuditKind, TeamEnvironmentState,
+    TeamIntegrationHandoff, TeamIntegrationMode, TeamKind, TeamManagedResource,
+    TeamManagedResourceKind, TeamManagedResourceStatus, TeamPhase, TeamStateBundle, TeamStatePaths,
+    TeamStateRecord, TeamStateWriteRequest, TeamTapeEntry, TeamTapeKind, TeamWorktreeState,
+    append_team_tape_entry, apply_role_assignment, indicates_replan, infer_iteration_role,
+    load_team_state_bundle, load_team_worktree, mark_cycle_artifact_handoff, mark_cycle_replan,
+    persist_team_state, update_team_environment_state, update_team_worktree,
+    write_team_state_bundle,
 };
 use crate::git_info::current_branch_name;
 use crate::git_info::get_head_commit_hash;
@@ -122,7 +123,7 @@ pub(crate) async fn prepare_child_team_spawn(
     prepare_vertical_handoff(
         workspace_root,
         &parent_thread_id.to_string(),
-        None,
+        /*receiver_team_id*/ None,
         items,
         "spawn",
     )
@@ -272,7 +273,7 @@ pub(crate) async fn record_child_team_spawn(
         Some(child.record.team_id.clone()),
         prepared.artifact_refs.clone(),
         Some("delegation".to_string()),
-        None,
+        /*peer_message*/ None,
     )
     .await?;
     if prepared.integration_handoff.is_some() {
@@ -284,7 +285,7 @@ pub(crate) async fn record_child_team_spawn(
             Some(parent.record.team_id.clone()),
             prepared.artifact_refs.clone(),
             Some("integration-ready".to_string()),
-            None,
+            /*peer_message*/ None,
         )
         .await?;
     }
@@ -321,29 +322,29 @@ fn enforce_transition_policies(
         ));
     }
 
-    if workflow.decision_policy.single_writer && handoff_boundary {
-        if let Some(iteration_role) = sender_iteration_role
-            && let Some(owner_team_id) = sender
-                .status
-                .cycle
-                .roles
-                .iter()
-                .find(|entry| entry.role == iteration_role)
-                .and_then(|entry| entry.owner_team_id.as_deref())
-            && owner_team_id != sender.record.team_id
-        {
-            record_policy_failure(
-                sender,
-                sender.status.current_phase.clone(),
-                "Single-writer policy blocked a non-owner finalize/handoff attempt.",
-                "Only the designated role owner may finalize this handoff.",
-                now,
-            );
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "singleWriter blocked finalize/handoff: only the designated owner may close this cycle.",
-            ));
-        }
+    if workflow.decision_policy.single_writer
+        && handoff_boundary
+        && let Some(iteration_role) = sender_iteration_role
+        && let Some(owner_team_id) = sender
+            .status
+            .cycle
+            .roles
+            .iter()
+            .find(|entry| entry.role == iteration_role)
+            .and_then(|entry| entry.owner_team_id.as_deref())
+        && owner_team_id != sender.record.team_id
+    {
+        record_policy_failure(
+            sender,
+            sender.status.current_phase.clone(),
+            "Single-writer policy blocked a non-owner finalize/handoff attempt.",
+            "Only the designated role owner may finalize this handoff.",
+            now,
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "singleWriter blocked finalize/handoff: only the designated owner may close this cycle.",
+        ));
     }
 
     if workflow.decision_policy.atomic_workflows
@@ -354,7 +355,9 @@ fn enforce_transition_policies(
             sender,
             sender.status.current_phase.clone(),
             "Atomic workflow requires persisted status, handoff, and governance checkpoints before finalize.",
-            "Persist the handoff manifest plus status.json, handoff.json, AGENT.md, and AGENT_TEAM.md before retrying.",
+            &format!(
+                "Persist the handoff manifest plus {TEAM_STATUS_FILENAME}, {TEAM_HANDOFF_FILENAME}, {TEAM_TAPE_FILENAME}, {GLOBAL_AGENT_DOC_FILENAME}, and {TEAM_AGENT_DOC_FILENAME} before retrying."
+            ),
             now,
         );
         return Err(io::Error::new(
@@ -383,6 +386,9 @@ fn has_atomic_checkpoint(sender: &TeamStateBundle, prepared: &PreparedTeamMessag
     if prepared.artifact_refs.is_empty() {
         return false;
     }
+    let Some(handoff_manifest_path) = prepared.artifact_refs.first() else {
+        return false;
+    };
     let required = [
         &sender.paths.status_path,
         &sender.paths.handoff_path,
@@ -390,9 +396,12 @@ fn has_atomic_checkpoint(sender: &TeamStateBundle, prepared: &PreparedTeamMessag
         &sender.paths.global_doc_path,
         &sender.paths.team_doc_path,
     ];
-    required
-        .iter()
-        .all(|path| prepared.artifact_refs.iter().any(|entry| entry == *path))
+    std::iter::once(handoff_manifest_path)
+        .chain(required.iter().copied())
+        .all(|path| {
+            prepared.artifact_refs.iter().any(|entry| entry == path)
+                && path.try_exists().unwrap_or(false)
+        })
 }
 
 fn record_policy_failure(
@@ -687,7 +696,7 @@ pub(crate) async fn record_team_resume(workspace_root: &Path, team_id: &str) -> 
         &bundle.record.team_id,
         TeamTapeKind::Resume,
         "Leader resumed from persisted artifacts.".to_string(),
-        None,
+        /*counterpart_team_id*/ None,
         vec![
             bundle.paths.status_path.clone(),
             bundle.paths.handoff_path.clone(),
@@ -695,7 +704,7 @@ pub(crate) async fn record_team_resume(workspace_root: &Path, team_id: &str) -> 
             bundle.paths.team_doc_path.clone(),
         ],
         Some("resume".to_string()),
-        None,
+        /*peer_message*/ None,
     )
     .await?;
     refresh_team_documents(workspace_root, team_id).await
@@ -767,7 +776,7 @@ async fn record_bootstrap_tape_entry(bundle: &TeamStateBundle) -> io::Result<()>
             bundle.paths.team_doc_path.clone(),
         ],
         Some("bootstrap".to_string()),
-        None,
+        /*peer_message*/ None,
     )
     .await?;
     Ok(())
@@ -802,7 +811,7 @@ async fn record_worktree_tape_entry(bundle: &TeamStateBundle) -> io::Result<()> 
             bundle.paths.team_doc_path.clone(),
         ],
         Some("worktree".to_string()),
-        None,
+        /*peer_message*/ None,
     )
     .await?;
     Ok(())
@@ -1185,8 +1194,8 @@ async fn ensure_governance_assets(
     }
     for (skill_name, contents) in governance_skill_assets(workflow) {
         let path = codex_root.join("skills").join(skill_name).join("SKILL.md");
-        let generated = wrap_generated_asset(&contents);
-        upsert_generated_markdown(&path, generated.clone(), generated).await?;
+        let generated = wrap_generated_skill_asset(&contents);
+        upsert_generated_skill_markdown(&path, generated.clone(), generated).await?;
     }
     Ok(())
 }
@@ -1292,12 +1301,10 @@ name: team-review-return-loop
 description: Run the design-development-review loop with explicit return-to-design or return-to-development conditions.
 ---
 
-- Every substantive cycle must cover {}.
+- Every substantive cycle must cover {roles}.
 - When review finds drift, boundary mismatch, or missing validation, return work with concrete findings and update `AGENT_TEAM.md` before the next delegation round.
 - Do not bypass review just because the branch builds.
 "#
-                ,
-                roles
             ),
         ),
         (
@@ -1596,6 +1603,25 @@ async fn upsert_generated_markdown(
     fs::write(path, next).await
 }
 
+async fn upsert_generated_skill_markdown(
+    path: &Path,
+    scaffold: String,
+    generated: String,
+) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let next = match fs::read_to_string(path).await {
+        Ok(existing) if existing.trim_start().starts_with("---") => {
+            merge_generated_section(existing, generated)
+        }
+        Ok(existing) => merge_legacy_skill_document(existing, generated),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => scaffold,
+        Err(err) => return Err(err),
+    };
+    fs::write(path, next).await
+}
+
 fn merge_generated_section(existing: String, generated: String) -> String {
     let Some(start_idx) = existing.find(GENERATED_SECTION_START) else {
         return format!("{}\n\n{}\n", existing.trim_end(), generated);
@@ -1612,10 +1638,32 @@ fn merge_generated_section(existing: String, generated: String) -> String {
     )
 }
 
+fn merge_legacy_skill_document(existing: String, generated: String) -> String {
+    let preserved = existing.trim();
+    if preserved.is_empty() {
+        return generated;
+    }
+    format!("{generated}\n\n<!-- codex-team-runtime:legacy-preserved -->\n{preserved}\n")
+}
+
 fn wrap_generated_asset(contents: &str) -> String {
     format!(
         "{GENERATED_SECTION_START}\n{}\n{GENERATED_SECTION_END}\n",
         contents.trim()
+    )
+}
+
+fn wrap_generated_skill_asset(contents: &str) -> String {
+    let trimmed = contents.trim();
+    let Some(frontmatter_body) = trimmed.strip_prefix("---\n") else {
+        return wrap_generated_asset(contents);
+    };
+    let Some((frontmatter, body)) = frontmatter_body.split_once("\n---\n") else {
+        return wrap_generated_asset(contents);
+    };
+    format!(
+        "---\n{frontmatter}\n---\n\n{GENERATED_SECTION_START}\n{}\n{GENERATED_SECTION_END}\n",
+        body.trim()
     )
 }
 
@@ -1934,8 +1982,7 @@ fn parse_a2a_envelope(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "A2A summary exceeds the {} character limit. Persist details to artifacts and reference them instead.",
-                TEAM_A2A_MAX_SUMMARY_LEN
+                "A2A summary exceeds the {TEAM_A2A_MAX_SUMMARY_LEN} character limit. Persist details to artifacts and reference them instead."
             ),
         ));
     }
@@ -1955,10 +2002,7 @@ fn parse_a2a_envelope(
     if raw_artifact_refs.len() > TEAM_A2A_MAX_ARTIFACT_REFS {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!(
-                "A2A envelopes may reference at most {} artifacts.",
-                TEAM_A2A_MAX_ARTIFACT_REFS
-            ),
+            format!("A2A envelopes may reference at most {TEAM_A2A_MAX_ARTIFACT_REFS} artifacts."),
         ));
     }
     let artifact_refs = raw_artifact_refs

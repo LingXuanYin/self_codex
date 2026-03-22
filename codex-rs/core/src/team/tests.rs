@@ -4,6 +4,8 @@ use super::TeamWorkflowPublicLifecycleState;
 use super::TeamWorkflowPublicMemoryProviderHealth;
 use super::TeamWorkflowPublicMemoryProviderMode;
 use super::TeamWorkflowThreadVisibility;
+use super::config::CrossLevelHandoffPolicy;
+use super::config::IterationRole;
 use super::config::TeamWorkflowConfig;
 use super::config::load_workflow_from_workspace;
 use super::load_public_team_workflow_session;
@@ -22,6 +24,7 @@ use super::state::TEAM_RECOVERY_FILENAME;
 use super::state::TEAM_STATUS_FILENAME;
 use super::state::TEAM_TAPE_FILENAME;
 use super::state::TeamPhase;
+use super::state::TeamRoleState;
 use super::state::load_team_state_bundle;
 use super::state::write_team_state_bundle;
 use super::team_workflow_thread_visibility;
@@ -29,6 +32,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
+use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::path::Path;
 use std::path::PathBuf;
@@ -50,7 +54,7 @@ fn run_git(cwd: &Path, args: &[&str]) {
         .args(args)
         .current_dir(cwd)
         .status()
-        .unwrap_or_else(|err| panic!("git {:?} failed to start: {err}", args));
+        .unwrap_or_else(|err| panic!("git {args:?} failed to start: {err}"));
     assert!(
         status.success(),
         "git {:?} failed in {}",
@@ -89,6 +93,26 @@ async fn workflow_loader_applies_default_depth_and_roles() {
     assert_eq!(
         workflow.workflow_loop.required_roles,
         TeamWorkflowConfig::default().workflow_loop.required_roles
+    );
+}
+
+#[tokio::test]
+async fn workflow_loader_accepts_openspec_artifacts_cross_level_handoff_alias() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    write_workflow(
+        &temp_dir,
+        "version: 1\nartifactPolicy:\n  crossLevelHandoff: openspec-artifacts\n",
+    )
+    .await;
+
+    let workflow = load_workflow_from_workspace(temp_dir.path())
+        .await
+        .expect("load workflow")
+        .expect("workflow should exist");
+
+    assert_eq!(
+        workflow.artifact_policy.cross_level_handoff,
+        CrossLevelHandoffPolicy::OpenSpecArtifacts
     );
 }
 
@@ -204,6 +228,18 @@ async fn root_team_initialization_persists_state_and_governance_docs() {
         .await
         .expect("read team tape");
     assert!(tape.contains("\"kind\":\"bootstrap\""));
+    let skill_doc = tokio::fs::read_to_string(
+        temp_dir
+            .path()
+            .join(".codex")
+            .join("skills")
+            .join("team-delegation")
+            .join("SKILL.md"),
+    )
+    .await
+    .expect("read team delegation skill");
+    assert!(skill_doc.starts_with("---\n"));
+    assert!(skill_doc.contains("<!-- codex-team-runtime:start -->"));
 }
 
 #[tokio::test]
@@ -270,6 +306,41 @@ async fn child_team_initialization_tracks_parent_and_preserves_manual_doc_conten
         .expect("read team doc");
     assert!(team_doc.contains("Manual notes."));
     assert!(team_doc.contains("codex-team-runtime:start"));
+}
+
+#[tokio::test]
+async fn root_team_initialization_repairs_legacy_skill_wrapper_layout() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    write_workflow(&temp_dir, "version: 1\n").await;
+    let skill_path = temp_dir
+        .path()
+        .join(".codex")
+        .join("skills")
+        .join("team-delegation")
+        .join("SKILL.md");
+    tokio::fs::create_dir_all(skill_path.parent().expect("skill parent"))
+        .await
+        .expect("create skill dir");
+    tokio::fs::write(
+        &skill_path,
+        "\n<!-- codex-team-runtime:start -->\n---\nname: team-delegation\ndescription: legacy generated layout\n---\n\n- legacy body\n<!-- codex-team-runtime:end -->\n",
+    )
+    .await
+    .expect("write legacy skill");
+
+    maybe_initialize_for_thread(temp_dir.path(), ThreadId::new(), &SessionSource::Exec, None)
+        .await
+        .expect("initialize root team");
+
+    let repaired = tokio::fs::read_to_string(skill_path)
+        .await
+        .expect("read repaired skill");
+    assert!(repaired.starts_with("---\n"));
+    assert!(repaired.contains("<!-- codex-team-runtime:start -->"));
+    assert!(!repaired.trim_start().starts_with("<!--"));
+    assert!(repaired.contains("legacy generated layout"));
+    assert!(repaired.contains("legacy body"));
+    assert!(repaired.contains("codex-team-runtime:legacy-preserved"));
 }
 
 #[tokio::test]
@@ -711,8 +782,7 @@ async fn sibling_peer_messages_require_structured_a2a_and_persist_peer_shape() {
     .expect("read tape");
     let last_entry: Value = serde_json::from_str(
         tape.lines()
-            .filter(|line| !line.trim().is_empty())
-            .next_back()
+            .rfind(|line| !line.trim().is_empty())
             .expect("last tape line"),
     )
     .expect("parse tape entry");
@@ -872,8 +942,7 @@ async fn vertical_handoff_allows_json_payload_without_a2a_protocol() {
         root_thread_id,
         vec![UserInput::Text {
             text: format!(
-                "{{\"summary\":\"handoff from {} about auth timeout\",\"details\":{{\"intent\":\"fix auth timeout\"}}}}",
-                escaped_workspace_root
+                "{{\"summary\":\"handoff from {escaped_workspace_root} about auth timeout\",\"details\":{{\"intent\":\"fix auth timeout\"}}}}"
             ),
             text_elements: Vec::new(),
         }],
@@ -1027,4 +1096,213 @@ async fn compact_checkpoint_and_resume_enforce_artifact_first_recovery() {
         .expect_err("resume should require persisted artifacts");
     assert!(resume_err.to_string().contains("resumeFromArtifacts"));
     assert!(resume_err.to_string().contains(TEAM_TAPE_FILENAME));
+}
+
+#[tokio::test]
+async fn atomic_workflow_allows_delivery_when_checkpoint_files_persist() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(&temp_dir);
+    write_workflow(&temp_dir, "version: 1\n").await;
+    let root_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+
+    maybe_initialize_for_thread(temp_dir.path(), root_thread_id, &SessionSource::Exec, None)
+        .await
+        .expect("initialize root team");
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        child_thread_id,
+        &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: root_thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: Some("Linus".to_string()),
+            agent_role: Some("development-lead".to_string()),
+        }),
+        None,
+    )
+    .await
+    .expect("initialize child team");
+
+    let mut child_bundle = load_team_state_bundle(temp_dir.path(), &child_thread_id.to_string())
+        .await
+        .expect("load child bundle")
+        .expect("child bundle exists");
+    let child_worktree = child_bundle
+        .record
+        .worktree
+        .clone()
+        .expect("child worktree assigned");
+    std::fs::write(
+        child_worktree.checkout_path.join("module.rs"),
+        "pub fn ready() {}\n",
+    )
+    .expect("write module");
+    run_git(&child_worktree.checkout_path, &["add", "module.rs"]);
+    run_git(
+        &child_worktree.checkout_path,
+        &["commit", "-m", "child change"],
+    );
+
+    let review_assignment = child_bundle
+        .status
+        .cycle
+        .roles
+        .iter_mut()
+        .find(|entry| entry.role == IterationRole::Review)
+        .expect("review assignment exists");
+    review_assignment.state = TeamRoleState::Complete;
+    review_assignment.updated_at = "2026-03-22T00:00:00Z".to_string();
+    write_team_state_bundle(&child_bundle)
+        .await
+        .expect("write child bundle");
+
+    let prepared = prepare_team_message(
+        temp_dir.path(),
+        child_thread_id,
+        root_thread_id,
+        vec![UserInput::Text {
+            text: "ready for parent review".to_string(),
+            text_elements: Vec::new(),
+        }],
+    )
+    .await
+    .expect("prepare handoff");
+    assert!(
+        prepared
+            .artifact_refs
+            .iter()
+            .any(|entry| entry == &child_bundle.paths.tape_path),
+        "prepared handoff should declare the tape artifact"
+    );
+
+    record_team_message_delivery(temp_dir.path(), child_thread_id, root_thread_id, &prepared)
+        .await
+        .expect("atomic checkpoint gate should allow persisted checkpoint files");
+
+    let updated_bundle = load_team_state_bundle(temp_dir.path(), &child_thread_id.to_string())
+        .await
+        .expect("reload child bundle")
+        .expect("child bundle exists");
+    assert_eq!(updated_bundle.status.current_phase, TeamPhase::Review);
+    assert!(
+        updated_bundle
+            .status
+            .blockers
+            .iter()
+            .all(|entry| !entry.contains("Atomic workflow requires persisted status"))
+    );
+}
+
+#[tokio::test]
+async fn atomic_workflow_requires_checkpoint_files_to_exist_after_prepare() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(&temp_dir);
+    write_workflow(&temp_dir, "version: 1\n").await;
+    let root_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+
+    maybe_initialize_for_thread(temp_dir.path(), root_thread_id, &SessionSource::Exec, None)
+        .await
+        .expect("initialize root team");
+    maybe_initialize_for_thread(
+        temp_dir.path(),
+        child_thread_id,
+        &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: root_thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: Some("Linus".to_string()),
+            agent_role: Some("development-lead".to_string()),
+        }),
+        None,
+    )
+    .await
+    .expect("initialize child team");
+
+    let mut child_bundle = load_team_state_bundle(temp_dir.path(), &child_thread_id.to_string())
+        .await
+        .expect("load child bundle")
+        .expect("child bundle exists");
+    let child_worktree = child_bundle
+        .record
+        .worktree
+        .clone()
+        .expect("child worktree assigned");
+    std::fs::write(
+        child_worktree.checkout_path.join("module.rs"),
+        "pub fn ready() {}\n",
+    )
+    .expect("write module");
+    run_git(&child_worktree.checkout_path, &["add", "module.rs"]);
+    run_git(
+        &child_worktree.checkout_path,
+        &["commit", "-m", "child change"],
+    );
+
+    let review_assignment = child_bundle
+        .status
+        .cycle
+        .roles
+        .iter_mut()
+        .find(|entry| entry.role == IterationRole::Review)
+        .expect("review assignment exists");
+    review_assignment.state = TeamRoleState::Complete;
+    review_assignment.updated_at = "2026-03-22T00:00:00Z".to_string();
+    write_team_state_bundle(&child_bundle)
+        .await
+        .expect("write child bundle");
+
+    let prepared = prepare_team_message(
+        temp_dir.path(),
+        child_thread_id,
+        root_thread_id,
+        vec![UserInput::Text {
+            text: "ready for parent review".to_string(),
+            text_elements: Vec::new(),
+        }],
+    )
+    .await
+    .expect("prepare handoff");
+    assert!(
+        prepared
+            .artifact_refs
+            .iter()
+            .any(|entry| entry == &child_bundle.paths.tape_path),
+        "prepared handoff should still declare the tape artifact"
+    );
+
+    let handoff_manifest_path = prepared
+        .artifact_refs
+        .first()
+        .cloned()
+        .expect("prepared handoff should include a manifest artifact");
+    tokio::fs::remove_file(&handoff_manifest_path)
+        .await
+        .expect("remove handoff manifest");
+    let err =
+        record_team_message_delivery(temp_dir.path(), child_thread_id, root_thread_id, &prepared)
+            .await
+            .expect_err("atomic checkpoint gate should reject deleted checkpoint files");
+    assert!(err.to_string().contains("atomicWorkflows"));
+
+    let updated_bundle = load_team_state_bundle(temp_dir.path(), &child_thread_id.to_string())
+        .await
+        .expect("reload child bundle")
+        .expect("child bundle exists");
+    assert!(
+        updated_bundle
+            .status
+            .blockers
+            .iter()
+            .any(|entry| entry.contains("Atomic workflow requires persisted status"))
+    );
+    assert!(
+        updated_bundle
+            .status
+            .next_steps
+            .iter()
+            .any(|entry| entry.contains("handoff manifest")),
+        "atomic workflow guidance should mention the handoff manifest checkpoint"
+    );
 }

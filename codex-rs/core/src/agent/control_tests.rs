@@ -36,6 +36,7 @@ async fn test_config_with_cli_overrides(
     let config = ConfigBuilder::default()
         .codex_home(home.path().to_path_buf())
         .cli_overrides(cli_overrides)
+        .fallback_cwd(Some(home.path().to_path_buf()))
         .loader_overrides(LoaderOverrides {
             #[cfg(target_os = "macos")]
             managed_preferences_base64: Some(String::new()),
