@@ -42,11 +42,26 @@
 
 ## 4. Spawn Ghost Handoff Artifacts
 
-- [ ] 4.1 Audit `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs` and `codex-rs/core/src/team/runtime.rs` to identify which prepared spawn-handoff files are created before child-thread creation succeeds
-- [ ] 4.2 Update the spawn bootstrap flow so child handoff content can be prepared in memory, but spawn manifests, integration patches, mirrored operator files, and delegation bookkeeping are persisted only after child spawn success is known
-- [ ] 4.3 Add or update focused tests in `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` that force a team-workflow `spawn_agent` failure after preview preparation and assert no fresh spawn handoff artifact or delegation bookkeeping survives
+- [x] 4.1 Audit `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs` and `codex-rs/core/src/team/runtime.rs` to identify which prepared spawn-handoff files are created before child-thread creation succeeds
+- [x] 4.2 Update the spawn bootstrap flow so child handoff content can be prepared in memory, but spawn manifests, integration patches, mirrored operator files, and delegation bookkeeping are persisted only after child spawn success is known
+- [x] 4.3 Add or update focused tests in `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` that force a team-workflow `spawn_agent` failure after preview preparation and assert no fresh spawn handoff artifact or delegation bookkeeping survives
 
 ## 5. Validation And Review For Spawn Ghost Handoff Artifacts
 
-- [ ] 5.1 Run the relevant Windows-local targeted `codex-core` validation commands for the touched `multi_agents` and `team` paths using the documented root-level virtual environment
-- [ ] 5.2 Record the validation outcomes, cleanup status, and residual review findings for the spawn ghost-artifact slice before taking the next batch
+- [x] 5.1 Run the relevant Windows-local targeted `codex-core` validation commands for the touched `multi_agents` and `team` paths using the documented root-level virtual environment
+- [x] 5.2 Record the validation outcomes, cleanup status, and residual review findings for the spawn ghost-artifact slice before taking the next batch
+
+## Validation Evidence For Spawn Ghost Handoff Artifacts
+
+- `cargo test -p codex-core failed_team_workflow_spawn_does_not_persist_handoff_artifacts`
+- `cargo test -p codex-core team_workflow_spawn_depth_limit_does_not_prepare_handoff_artifacts`
+- `cargo test -p codex-core spawn_agent_uses_artifact_manifest_for_team_workflow_child_handoff`
+- `cargo clippy --fix --tests --allow-dirty -p codex-core`
+- `cargo fmt`
+- `tools/argument-comment-lint/run.sh -p codex-core` via Git Bash with `.venv-tools`
+
+## Residual Review Notes For Spawn Ghost Handoff Artifacts
+
+- The bounded fix now defers manifest and patch persistence until child spawn succeeds, but it still relies on `prepared.artifact_refs.first()` as the manifest identity.
+- The later failure window where child spawn succeeds but `record_child_team_spawn` fails remains a follow-up risk outside this slice.
+- Windows validation still depends on targeted `cargo` commands plus Git Bash wrappers rather than full `just` recipes or full-suite `codex-core` execution.
