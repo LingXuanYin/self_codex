@@ -13,10 +13,10 @@ The current product and code direction is to stabilize the `team-workflow` runti
 
 ## Review Snapshot
 
-- Recent commits focus on team-workflow handoff hardening, path sanitization, OpenSpec scaffolding, and cross-platform recovery.
-- `codex-rs/core/src/team/runtime.rs` is the primary orchestration surface for team state, handoff shaping, runtime docs, and operator-visible artifacts.
-- `codex-rs/core/src/tools/handlers/multi_agents*.rs` is the primary integration surface for `spawn_agent`, `send_input`, and `resume_agent`.
-- Current tests already cover many handoff and multi-agent paths, but they are concentrated in focused unit/integration-style tests rather than a fully stable Windows-wide suite.
+- The first implementation slice is now landed in the working tree: `atomicWorkflows` requires the handoff manifest plus `status.json`, `handoff.json`, `team-tape.jsonl`, `AGENT.md`, and `AGENT_TEAM.md` to remain both declared and present on disk before delivery succeeds.
+- `codex-rs/core/src/team/runtime.rs` remains the primary orchestration surface for team state, handoff shaping, runtime docs, and operator-visible artifacts.
+- `codex-rs/core/src/tools/handlers/multi_agents*.rs` remains the primary integration surface for `spawn_agent`, `send_input`, and `resume_agent`; Windows-targeted tests for the touched paths passed in this cycle.
+- Runtime-generated `.codex/skills/*/SKILL.md` files are now repaired to start with valid YAML frontmatter while preserving legacy content under a marker for manual follow-up if needed.
 
 ## Current Assumptions
 
@@ -27,14 +27,14 @@ The current product and code direction is to stabilize the `team-workflow` runti
 ## Current Iteration Ownership
 
 - Lead: main Codex thread, responsible for branch ownership, artifact writes, and final integration decisions.
-- Design: sub-agent `Hilbert`, which proposed the first bounded implementation candidates and their acceptance criteria.
+- Design: sub-agent `Boyle`, which revalidated the exact six-checkpoint contract and kept the slice bounded.
 - Development: main Codex thread for the first code batch, with bounded implementation delegation allowed after the design handoff is folded back into docs.
-- Review: `IMPLEMENTATION-REVIEW.md` is the active baseline, and sub-agent `Harvey` supplied the prioritized review brief that selected the first batch gate.
+- Review: `IMPLEMENTATION-REVIEW.md` is the active baseline, and sub-agent `Harvey` confirmed the original blocker areas are closed with only low residual risks left.
 
 ## Selected First Slice
 
 - Slice name: `atomic-checkpoint-existence-enforcement`
-- Intent: make `atomicWorkflows` validate the required checkpoint files by actual file existence, not only by stale `artifact_refs`, so artifact-first recovery cannot be bypassed by deleted or stale checkpoint files.
+- Intent: make `atomicWorkflows` validate the handoff manifest plus `status.json`, `handoff.json`, `team-tape.jsonl`, `AGENT.md`, and `AGENT_TEAM.md` by actual file existence, not only by stale `artifact_refs`, so artifact-first recovery cannot be bypassed by deleted or stale checkpoint files.
 - Primary files:
   - `codex-rs/core/src/team/runtime.rs`
   - `codex-rs/core/src/team/tests.rs`
@@ -50,16 +50,16 @@ The current product and code direction is to stabilize the `team-workflow` runti
 
 ## Current Blockers
 
-- Root workflow documents have been canonicalized, but older references may still point to compatibility aliases and should be normalized as code work begins.
-- Some repo recipes depend on POSIX shell execution, so local Windows validation must document cargo-first fallbacks where `just` cannot execute.
-- The full `codex-core` suite is not yet treated as a reliable Windows completion gate; targeted validation remains necessary until the next batch tightens that story.
-- The first Rust batch should stay bounded to the atomic checkpoint gate and focused tests; adjacent review findings must remain deferred unless implementation proves a direct dependency.
+- `just` recipes that assume a POSIX shell are still not reliable on this Windows machine; this cycle used `cargo clippy --fix` and Git Bash for `argument-comment-lint` as documented fallbacks.
+- The full `codex-core` suite is still not treated as a reliable Windows completion gate; targeted validation remains necessary until the next batch tightens that story.
+- The handoff manifest is still identified by `prepared.artifact_refs.first()` rather than a typed field; that ordering assumption remains a low follow-up risk rather than a blocker for this slice.
+- Legacy skill repair currently preserves prior content under a marker rather than migrating it structurally; that is acceptable for loader recovery but remains a follow-up cleanup candidate.
 
 ## Next Intended Step
 
-1. Implement `atomic-checkpoint-existence-enforcement` in `codex-rs/core/src/team/runtime.rs`.
-2. Add or update focused missing-checkpoint tests in `codex-rs/core/src/team/tests.rs`.
-3. Run Windows-local targeted formatting and validation, then fold the results back into review artifacts.
+1. Commit the bounded implementation batch and the updated recovery/OpenSpec documents in reviewable units.
+2. Push the branch state after commit hygiene is complete.
+3. Start the next design-review-development cycle from the remaining follow-up findings, with `spawn_agent` ghost handoff artifacts as the leading deferred candidate.
 
 ## Compact Recovery
 
