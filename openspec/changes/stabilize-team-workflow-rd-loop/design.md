@@ -1,138 +1,184 @@
 ## Context
 
-The active `team-workflow` branch already enforces review-first handoff rules,
-compact checkpoints, and artifact-based recovery. The next gap is narrower than
-the original cross-cutting proposal: when `atomicWorkflows` is enabled,
-finalize and handoff are currently gated by whether required checkpoint paths
-appear in `prepared.artifact_refs`, not whether those files still exist on
-disk.
+The active `team-workflow` work already spans repository documents, `codex-rs/core/src/team/*`, multi-agent tool handlers, and app-server protocol exports. Recent fixes show that the hardest failures are not isolated feature bugs; they are coordination bugs across governance state, public visibility, path handling, and handoff protocol shape.
 
-That leaves an artifact-first recovery hole. A stale manifest can satisfy the
-gate even after a required checkpoint file has been deleted. This first
-implementation slice closes that hole without reopening broader protocol or
-spawn-lifecycle work.
+This iteration must start from a document-first workflow because the user explicitly requires:
 
-Constraints for this batch:
+- design, development, and review participation in every cycle
+- committed recovery state before coding
+- Windows local development without Docker
+- virtual-environment-backed local tooling
+- recovery from compact using repository documents rather than hidden context
 
-- Windows local development is the primary execution path.
-- `.venv-tools` remains the canonical root-level virtual environment.
-- The slice must stay bounded to one runtime policy gate and focused tests.
-- Final artifact writes remain lead-owned; design and review inputs are folded
-  back into committed docs before code changes start.
+The repository already has a natural technical split:
+
+- governance and recovery policy in `team/config.rs`, `team/state.rs`,
+  `TEAM-ORCHESTRATION.md`, `CURRENT-STAGE.md`, `LOCAL-DEV.md`, and
+  `IMPLEMENTATION-REVIEW.md`
+- runtime orchestration in `team/runtime.rs`
+- operator/public projection in `team/api.rs`
+- tool-surface enforcement in `tools/handlers/multi_agents/*`
+- protocol visibility in `app-server-protocol`
+
+This batch intentionally does not span every boundary above. The first implementation slice is narrower: enforce that `atomicWorkflows` depends on the continued existence of persisted checkpoint files, not just historical references to them.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Make `atomicWorkflows` require real persisted checkpoint files, not only
-  declared artifact references.
-- Keep the implementation centered on the existing delivery gate in
-  `codex-rs/core/src/team/runtime.rs`.
-- Add focused tests that prove deleted checkpoint files block finalize or
-  handoff.
-- Preserve the current public protocol and workflow document contract while
-  tightening runtime enforcement.
+- Make the triad workflow observable and recoverable from committed artifacts.
+- Strengthen artifact-first recovery by ensuring atomic finalize or handoff gates depend on real persisted checkpoints.
+- Preserve Windows-first local development by documenting and reusing the current virtual-environment/tooling setup.
+- Tighten unit tests around the selected runtime change boundary before reopening broader public-protocol work.
 
 **Non-Goals:**
 
-- Change public session or app-server protocol shapes.
-- Rework child spawn lifecycle or fix ghost handoff artifacts in this batch.
-- Redesign replan heuristics or broader workflow policy detection.
-- Refactor unrelated portions of `team/runtime.rs`.
-- Make the full Windows `codex-core` suite the required completion gate for
-  this slice.
+- Introduce a new collaboration mode beyond the current single/delegate/parallel model.
+- Replace the existing `openspec-artifacts` vertical handoff protocol.
+- Rework unrelated product areas outside `team-workflow` runtime checkpoint enforcement.
+- Depend on Docker or a new external orchestration stack for local development.
+- Expand the public session or app-server protocol surface in this first batch.
+- Refactor broad sections of `team/runtime.rs` beyond the checkpoint gate and its test support.
 
 ## Decisions
 
-### Decision: enforce both declaration and on-disk existence for atomic checkpoints
+### Decision: Treat repository documents as first-class workflow state
 
 - Decision:
-  - Update the atomic workflow gate so success requires both:
-    - each required checkpoint path is present in `prepared.artifact_refs`
-    - each required checkpoint file currently exists on disk
+  - Use committed repo-root governance files plus OpenSpec artifacts as the
+    canonical recovery surface before implementation starts.
 - Why:
-  - `prepared.artifact_refs` represents declared outputs, but the policy is
-    about persisted recovery artifacts.
-  - The resume flow already treats missing persisted files as a hard failure;
-    finalize and handoff should align with that rule under `atomicWorkflows`.
+  - The user requires compact recovery from documents.
+  - The repo already persists `.codex` team state, but committed governance
+    artifacts are better for cross-role review and branch-local iteration.
 - Alternatives considered:
-  - Trust only `artifact_refs`.
-    - Rejected because stale paths can outlive deleted files.
-  - Recompute required artifacts from state without checking the filesystem.
-    - Rejected because the gap is specifically missing persisted files.
+  - Rely only on `.codex/team-state` runtime files.
+    - Rejected because they are runtime-oriented and weaker for human review handoff.
+  - Rely on chat context alone.
+    - Rejected because it fails the compact-recovery requirement.
 
-### Decision: keep the change inside the existing runtime gate
+### Decision: Keep one OpenSpec change with one cross-cutting capability
 
 - Decision:
-  - Extend `has_atomic_checkpoint` in `codex-rs/core/src/team/runtime.rs`
-    instead of introducing a wider structural refactor.
+  - Use one change, `stabilize-team-workflow-rd-loop`, with one
+    cross-cutting capability, `team-workflow-rd-loop`, that covers
+    governance, recovery, handoffs, and Windows-local validation as one
+    reviewable iteration contract.
 - Why:
-  - The bug is localized to the current policy gate at delivery time.
-  - A small helper change is easier to review and less risky in a large runtime
-    module.
+  - Governance, recovery, handoffs, and validation are coupled in both the
+    user workflow and the implementation seams touched by the current branch.
 - Alternatives considered:
-  - Move checkpoint validation into a new module now.
-    - Rejected for this slice because the behavior change is small and urgent.
+  - Split governance and handoffs into separate changes.
+    - Rejected because the same iteration must review the entire design/development/review loop together.
 
-### Decision: prove the fix with delete-after-prepare tests
+### Decision: Preserve single-writer integration with parallel analysis
 
 - Decision:
-  - Use focused tests in `codex-rs/core/src/team/tests.rs` that prepare a
-    message, delete one of the required checkpoint files, and assert that
-    delivery fails under `atomicWorkflows`.
+  - Sub-agents may inspect, critique, and prepare bounded inputs, but only the lead writes canonical docs and final code.
 - Why:
-  - The bug is not about manifest construction; it is about what happens after
-    a valid manifest becomes stale.
-  - Delete-after-prepare exercises the exact failure mode that currently slips
-    through the gate.
+  - This matches both the user protocol and the repo's multi-agent safety model.
 - Alternatives considered:
-  - Add only positive-path coverage.
-    - Rejected because the missing-file regression is the core behavior to
-      prove.
+  - Let role-aligned sub-agents write separate canonical artifacts in parallel.
+    - Rejected because document drift and merge conflicts would undermine recovery fidelity.
 
-### Decision: defer adjacent review findings
+### Decision: Stabilize the contract at three boundaries
 
 - Decision:
-  - Keep spawn ghost-handoff cleanup and replan heuristic redesign out of this
-    batch.
+  - Validate behavior at:
+    - repository workflow boundary
+    - runtime/handler boundary
+    - public protocol boundary
 - Why:
-  - Those findings are real, but they touch different seams and would widen the
-    implementation and review surface.
+  - Recent regressions crossed those exact seams.
 - Alternatives considered:
-  - Bundle multiple review findings into one cross-cutting patch.
-    - Rejected because it weakens the artifact-first, reviewable iteration
-      contract.
+  - Focus only on runtime internals.
+    - Rejected because public protocol and tool handlers are part of the observed contract.
+
+### Decision: Start with atomic checkpoint existence enforcement
+
+- Decision:
+  - The first implementation batch will change `codex-rs/core/src/team/runtime.rs` so `atomicWorkflows` only passes when required checkpoint files both appear in `prepared.artifact_refs` and still exist on disk.
+- Why:
+  - `has_atomic_checkpoint` currently trusts stale declarations and does not verify that required files remain persisted.
+  - That is the smallest concrete gap that directly weakens artifact-first recovery.
+- Alternatives considered:
+  - Fix `spawn_agent` ghost handoff artifacts first.
+    - Rejected for this batch because it crosses handler and runtime seams and is less bounded.
+  - Expand public workflow session visibility first.
+    - Rejected because it broadens the protocol surface before the persistence contract is hardened.
+
+### Decision: Prefer targeted verification on Windows before broader suites
+
+- Decision:
+  - Run focused crate tests and explicit end-to-end scenarios first, then broaden only as far as the environment and repo policy allow.
+- Why:
+  - The current Windows environment has known `just`/shell limitations and broader suite noise.
+- Alternatives considered:
+  - Start with full workspace test execution.
+    - Rejected because it is slower, noisier, and currently constrained by environment policy.
 
 ## Risks / Trade-offs
 
-- [Large runtime hotspot] -> Mitigation: keep the logic change small and
-  targeted; do not refactor unrelated delivery behavior.
-- [Cross-platform file existence edge cases] -> Mitigation: rely on the
-  existing checkpoint paths already created by the runtime and validate with
-  focused Windows-local tests.
-- [Spec/doc drift] -> Mitigation: finish the doc updates and commit them before
-  Rust edits begin.
-- [Validation noise from Windows shell differences] -> Mitigation: use direct
-  `cargo` commands and record any `just` limitations in the iteration evidence.
+- [Large runtime hotspot] -> Mitigation: keep the batch scoped to the existing checkpoint gate, and only extract a helper if the existence check becomes materially more complex.
+- [Windows shell drift for `just` workflows] -> Mitigation: document exact fallback command patterns and isolate the impact in `LOCAL-DEV.md`.
+- [Spec/doc drift from implementation] -> Mitigation: treat proposal/specs/design/tasks as preconditions for coding and update them before any scope change.
+- [False confidence from artifact refs] -> Mitigation: add a regression test that deletes a required checkpoint file after preparation and asserts atomic finalize or handoff fails.
 
 ## Migration Plan
 
-1. Align `CURRENT-STAGE.md`, `IMPLEMENTATION-REVIEW.md`, `design.md`, and
-   `tasks.md` on the chosen slice.
-2. Update the atomic checkpoint gate in `codex-rs/core/src/team/runtime.rs`.
-3. Add or update focused tests in `codex-rs/core/src/team/tests.rs`.
-4. Run targeted formatting and crate-local validation on Windows using the
-   documented virtual environment.
-5. Record review findings, validation evidence, and cleanup status before
-   taking the next slice.
+1. Commit repo-root workflow and recovery docs.
+2. Commit OpenSpec artifacts that define the selected first slice and its testable requirements.
+3. Implement the runtime checkpoint existence enforcement in `codex-rs/core/src/team/runtime.rs`.
+4. Add focused regression coverage in `codex-rs/core/src/team/tests.rs`.
+5. Run focused crate tests, then required end-to-end checks.
+6. Perform review against committed docs plus test evidence.
 
 Rollback strategy:
 
-- Revert the Rust implementation commit if the behavior change proves invalid.
-- Keep the design and review docs if the slice remains the right direction, and
-  revise only the implementation tasks.
+- Revert the implementation commits while preserving the documentation commits
+  if the docs remain valid for the next attempt.
+- If the design itself is invalidated, update the OpenSpec and repo-root docs
+  in follow-up commits before retrying.
 
 ## Open Questions
 
-- Whether the later spawn-flow cleanup should reuse the same persisted-artifact
-  validation primitives remains open, but it is not blocking this slice.
+- Should the file-existence check stay inline with `has_atomic_checkpoint` or move to a helper if more persisted-artifact rules follow?
+- Which additional atomic workflow regressions should become follow-on slices after this file-existence gate lands?
+- Which end-to-end scenarios are the minimum credible set for Windows in this environment without overfitting to local shell constraints?
+
+## Acceptance Criteria
+
+- `atomicWorkflows` rejects finalize or handoff when any required checkpoint file is missing on disk, even if `prepared.artifact_refs` still names it.
+- Existing success behavior remains intact when all required checkpoint files are both declared and present.
+- The implementation does not change app-server protocol types or the same-level versus vertical handoff contract in this batch.
+- Focused tests cover the missing-file regression and keep artifact-first recovery behavior explicit.
+
+## File Boundary
+
+- Primary edit target:
+  - `codex-rs/core/src/team/runtime.rs`
+- Required tests:
+  - `codex-rs/core/src/team/tests.rs`
+- Reference-only files unless implementation proves otherwise:
+  - `codex-rs/core/src/team/state.rs`
+  - `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs`
+
+## Test Plan
+
+1. Add or update a focused `codex-rs/core/src/team/tests.rs` case that prepares an atomic workflow handoff, removes one required checkpoint file, and asserts delivery is rejected.
+2. Re-run the existing compact or resume artifact-first recovery coverage to ensure the new gate is aligned with the persisted-artifact contract.
+3. Run targeted `codex-core` tests on Windows using the documented `.venv-tools` environment, then broaden only if the results justify it.
+
+## Planning State
+
+- Active mode: `parallel`
+- Current assumptions:
+  - The active branch continues the current `team-workflow` direction.
+  - Windows local development without Docker remains the primary execution path.
+  - `.venv-tools` remains the baseline root-level Python environment unless implementation proves otherwise.
+- Current blockers:
+  - The first code batch must stay scoped to atomic checkpoint existence enforcement and avoid reopening wider protocol or spawn-handoff issues.
+  - Some repo recipes remain constrained by POSIX-shell expectations on Windows.
+  - Broad Windows-wide completion criteria remain less trustworthy than targeted test evidence.
+- Next intended step:
+  - Update `tasks.md` to the selected first slice, then implement the runtime and test changes.
