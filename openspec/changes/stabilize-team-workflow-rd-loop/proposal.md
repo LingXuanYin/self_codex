@@ -1,19 +1,33 @@
 ## Why
 
-The repository already contains substantial `team-workflow` runtime behavior, but the next iteration still lacks a formal change contract that ties governance, handoff boundaries, recovery artifacts, and Windows-local validation into one review-first development loop. This change is needed now to prevent design, development, and review from drifting apart while the implementation is actively evolving.
+The current branch already carries meaningful `team-workflow` runtime and
+multi-agent behavior, but the next iteration still needs a stable contract
+that keeps design, development, and review aligned through compaction,
+handoff, and Windows-local validation. We need that contract now so the
+implementation can continue without drifting away from its recovery and review
+requirements.
 
 ## What Changes
 
-- Formalize the current `team-workflow` direction as an implementation contract before any new code batch starts.
-- Define a governed design-development-review loop with explicit persisted recovery points, role handoffs, and review gates.
-- Define the operator-facing and local-development requirements for Windows-first, no-Docker development using a root-level virtual environment.
-- Establish the validation contract for targeted unit and end-to-end evidence around `team`, `multi_agents`, and workflow protocol behavior.
+- Formalize the current `team-workflow` direction as a review-first
+  implementation contract before the next code batch starts.
+- Define the governance and recovery requirements for the active
+  design-development-review loop.
+- Define the hardening requirements for handoff, visibility, and validation
+  across `team`, `multi_agents`, and workflow protocol surfaces.
+- Record the Windows-local development baseline for this change line,
+  including virtual-environment usage, direct `cargo` fallbacks, and cleanup
+  expectations.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `team-workflow-rd-loop`: Defines the governed review-first workflow, persisted recovery artifacts, local Windows development baseline, and verification contract for the current `team-workflow` direction.
+- `team-rd-governance`: Defines the repository-visible design,
+  development, and review loop, plus recovery checkpoints and review gates
+  for active implementation batches.
+- `team-workflow-hardening`: Defines the bounded runtime, handoff,
+  visibility, and validation expectations for changed workflow surfaces.
 
 ### Modified Capabilities
 
@@ -22,27 +36,16 @@ The repository already contains substantial `team-workflow` runtime behavior, bu
 ## Impact
 
 - Affected code:
-  - `codex-rs/core/src/team/config.rs`
-  - `codex-rs/core/src/team/runtime.rs`
-  - `codex-rs/core/src/team/api.rs`
-  - `codex-rs/core/src/tools/handlers/multi_agents*.rs`
-  - `codex-rs/app-server-protocol/src/protocol/common.rs`
-  - `codex-rs/app-server-protocol/src/protocol/v2.rs`
+  - `codex-rs/core/src/team/*`
+  - `codex-rs/core/src/tools/handlers/multi_agents*`
+  - `codex-rs/app-server-protocol/src/protocol/*`
+- Affected artifacts:
+  - `TEAM-ORCHESTRATION.md`
+  - `CURRENT-STAGE.md`
+  - `IMPLEMENTATION-REVIEW.md`
+  - `LOCAL-DEV.md`
+  - `openspec/changes/stabilize-team-workflow-rd-loop/*`
 - Affected systems:
   - Root-level workflow documentation and compact recovery flow
   - Windows local development environment and validation path
   - Team-workflow public visibility, handoff, and review governance
-
-## Planning State
-
-- Active mode: `parallel`
-- Current assumptions:
-  - The current direction remains `team-workflow` hardening rather than a product pivot.
-  - Windows local development without Docker remains the primary execution path for this cycle.
-  - `.venv-tools` remains the baseline Python environment unless implementation forces a new root-level environment.
-- Current blockers:
-  - The exact implementation slice still needs to be narrowed into spec/design/tasks artifacts.
-  - Some `just` recipes are not reliable on the current Windows shell path and require documented `cargo`-first fallbacks.
-  - Full Windows-wide completion criteria still require targeted validation rather than broad suite trust.
-- Next intended step:
-  - Define the normative workflow and local-validation requirements in specs, then convert them into design and tasks.
