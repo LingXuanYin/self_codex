@@ -4,6 +4,8 @@
 - Container policy: do not use Docker for this workflow
 - Workspace root: `I:\self_codex`
 - Primary Rust workspace: `I:\self_codex\codex-rs`
+- Active branch: `feature/stabilize-team-workflow-rd-loop`
+- Active OpenSpec change: `openspec/changes/stabilize-team-workflow-rd-loop/`
 
 ## Local Python Environment
 
@@ -52,9 +54,10 @@ $env:PYTHON = 'I:\self_codex\.venv-tools\Scripts\python.exe'
 
 ## Development Workflow Rules
 
-- Put workflow and local-development documentation directly in the project root.
+- Keep local workflow and environment materials at the repo root or under the
+  repo-root `.codex/` governance directory.
 - Keep canonical progress/recovery state in committed Markdown, not transient terminal context.
-- Before implementation, update root docs and OpenSpec artifacts first.
+- Before implementation, update governance docs and OpenSpec artifacts first.
 
 ## Test Strategy
 
@@ -87,8 +90,8 @@ Get-Process | Where-Object { $_.ProcessName -match 'cargo|rustc|rustdoc|clippy|j
 
 After any compact or interruption, recover from:
 
-- `TEAM_CHARTER.md`
-- `IMPLEMENTATION_REVIEW.md`
 - `LOCAL_ENV.md`
-- `WORKING_STATE.md`
+- `.codex/AGENT_TEAM.md`
+- `.codex/team-workflow.yaml`
 - `openspec/changes/stabilize-team-workflow-rd-loop/*`
+- `git log --oneline --decorate -10`
