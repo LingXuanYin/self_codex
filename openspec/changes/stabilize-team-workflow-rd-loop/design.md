@@ -97,7 +97,7 @@ This batch intentionally does not span every boundary above. The first implement
 ### Decision: Start with atomic checkpoint existence enforcement
 
 - Decision:
-  - The first implementation batch will change `codex-rs/core/src/team/runtime.rs` so `atomicWorkflows` only passes when required checkpoint files both appear in `prepared.artifact_refs` and still exist on disk.
+  - The first implementation batch will change `codex-rs/core/src/team/runtime.rs` so `atomicWorkflows` only passes when the handoff manifest plus `status.json`, `handoff.json`, `team-tape.jsonl`, `AGENT.md`, and `AGENT_TEAM.md` all appear in `prepared.artifact_refs` and still exist on disk at delivery time.
 - Why:
   - `has_atomic_checkpoint` currently trusts stale declarations and does not verify that required files remain persisted.
   - That is the smallest concrete gap that directly weakens artifact-first recovery.
@@ -148,8 +148,8 @@ Rollback strategy:
 
 ## Acceptance Criteria
 
-- `atomicWorkflows` rejects finalize or handoff when any required checkpoint file is missing on disk, even if `prepared.artifact_refs` still names it.
-- Existing success behavior remains intact when all required checkpoint files are both declared and present.
+- `atomicWorkflows` rejects finalize or handoff when the handoff manifest or any of `status.json`, `handoff.json`, `team-tape.jsonl`, `AGENT.md`, or `AGENT_TEAM.md` is missing on disk, even if `prepared.artifact_refs` still names it.
+- Existing success behavior remains intact when the handoff manifest plus `status.json`, `handoff.json`, `team-tape.jsonl`, `AGENT.md`, and `AGENT_TEAM.md` are all both declared and present.
 - The implementation does not change app-server protocol types or the same-level versus vertical handoff contract in this batch.
 - Focused tests cover the missing-file regression and keep artifact-first recovery behavior explicit.
 
@@ -165,9 +165,10 @@ Rollback strategy:
 
 ## Test Plan
 
-1. Add or update a focused `codex-rs/core/src/team/tests.rs` case that prepares an atomic workflow handoff, removes one required checkpoint file, and asserts delivery is rejected.
-2. Re-run the existing compact or resume artifact-first recovery coverage to ensure the new gate is aligned with the persisted-artifact contract.
-3. Run targeted `codex-core` tests on Windows using the documented `.venv-tools` environment, then broaden only if the results justify it.
+1. Add or update a focused `codex-rs/core/src/team/tests.rs` case that prepares an atomic workflow handoff, removes the handoff manifest, and asserts delivery is rejected as a representative required-checkpoint failure.
+2. Add or update a focused success case that keeps the handoff manifest plus `status.json`, `handoff.json`, `team-tape.jsonl`, `AGENT.md`, and `AGENT_TEAM.md` persisted and asserts delivery still succeeds.
+3. Re-run the existing compact or resume artifact-first recovery coverage to ensure the new gate is aligned with the persisted-artifact contract.
+4. Run targeted `codex-core` tests on Windows using the documented `.venv-tools` environment, then broaden only if the results justify it.
 
 ## Planning State
 
@@ -181,4 +182,4 @@ Rollback strategy:
   - Some repo recipes remain constrained by POSIX-shell expectations on Windows.
   - Broad Windows-wide completion criteria remain less trustworthy than targeted test evidence.
 - Next intended step:
-  - Update `tasks.md` to the selected first slice, then implement the runtime and test changes.
+  - Complete the bounded runtime and test changes, record targeted validation outcomes, and commit the implementation plus recovery-doc updates.
