@@ -1,0 +1,43 @@
+version: 1
+rootScheduler:
+  role: root-scheduler
+  charterOwner: codex-lead
+decisionPolicy:
+  allowedModes:
+    - single
+    - delegate
+    - parallel
+  singleWriter: true
+  atomicWorkflows: true
+workflowLoop:
+  requiredRoles:
+    - design
+    - development
+    - review
+  reviewRequired: true
+  persistBeforeCompact: true
+  resumeFromArtifacts: true
+governance:
+  updateTriggers:
+    - team_created
+    - replan
+    - review_handoff
+    - compact
+    - leader_resume
+artifactPolicy:
+  sameLevelContextProtocol: a2a
+  crossLevelHandoff: openspec-artifacts
+  artifactDirectory: artifacts
+memoryProvider:
+  mode: local
+teamTemplates:
+  - id: design-lead
+    leaderRole: design-lead
+    defaultMode: delegate
+  - id: development-lead
+    leaderRole: development-lead
+    defaultMode: parallel
+  - id: review-lead
+    leaderRole: review-lead
+    defaultMode: single
+maxDepth: 5
