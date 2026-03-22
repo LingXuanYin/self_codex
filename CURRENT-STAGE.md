@@ -53,13 +53,13 @@ The current product and code direction is to stabilize the `team-workflow` runti
 - Root workflow documents have been canonicalized, but older references may still point to compatibility aliases and should be normalized as code work begins.
 - Some repo recipes depend on POSIX shell execution, so local Windows validation must document cargo-first fallbacks where `just` cannot execute.
 - The full `codex-core` suite is not yet treated as a reliable Windows completion gate; targeted validation remains necessary until the next batch tightens that story.
-- The selected slice and review priorities still need to be folded into `IMPLEMENTATION-REVIEW.md`, `design.md`, and `tasks.md` before code changes begin.
+- The first Rust batch should stay bounded to the atomic checkpoint gate and focused tests; adjacent review findings must remain deferred unless implementation proves a direct dependency.
 
 ## Next Intended Step
 
-1. Update `IMPLEMENTATION-REVIEW.md` with the prioritized findings and the first-slice decision.
-2. Update `design.md` and `tasks.md` so they are specific to `atomic-checkpoint-existence-enforcement`.
-3. Start implementation only after those doc updates are committed.
+1. Implement `atomic-checkpoint-existence-enforcement` in `codex-rs/core/src/team/runtime.rs`.
+2. Add or update focused missing-checkpoint tests in `codex-rs/core/src/team/tests.rs`.
+3. Run Windows-local targeted formatting and validation, then fold the results back into review artifacts.
 
 ## Compact Recovery
 
