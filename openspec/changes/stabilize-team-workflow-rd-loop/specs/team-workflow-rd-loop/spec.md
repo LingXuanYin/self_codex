@@ -66,28 +66,12 @@ reviewable integration metadata without leaking hidden child details.
 - **AND** the manifest SHALL avoid exposing hidden child-only identifiers or
   unsafe absolute paths
 
-#### Scenario: Child spawn fails after handoff preparation starts
-- **WHEN** `spawn_agent` prepares a vertical artifact handoff for a new child
-  team but the child spawn fails before the child team is created
-- **THEN** the runtime SHALL NOT leave new persisted spawn-handoff artifacts
-  behind that imply the child team was created successfully
-- **AND** any temporary manifest or mirrored operator-visible artifact created
-  only for that failed spawn attempt SHALL be cleaned up before control
-  returns to the caller
-
-#### Scenario: Child spawn fails after handoff preparation
-- **WHEN** `spawn_agent` prepares a child-team vertical handoff manifest but
-  child-thread creation fails before the workflow can record the delegation
-- **THEN** the system SHALL not retain a fresh spawn handoff artifact that
-  implies a child team was created
-- **AND** the operator-visible mirror for that fresh spawn handoff SHALL also
-  be removed
-
 #### Scenario: Failed child spawn does not leave ghost handoff artifacts
 - **WHEN** `spawn_agent` prepares a vertical handoff for a child team but the
   child thread is not actually created
-- **THEN** the runtime SHALL not leave behind a new spawn handoff manifest or
-  spawn-only patch artifact that implies a successful delegation
+- **THEN** the runtime SHALL not leave behind a new spawn handoff manifest,
+  operator-visible mirror, or spawn-only patch artifact that implies a
+  successful delegation
 - **AND** the parent team SHALL not record a delegation tape entry or
   handoff-produced artifact for that failed spawn attempt
 
