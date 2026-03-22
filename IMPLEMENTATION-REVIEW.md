@@ -25,12 +25,12 @@
 - `multi_agents` handlers already integrate with the workflow for spawn, send, resume, and boundary-aware handoff conversion.
 - Focused tests already cover key handoff and review-gate behavior in `core/src/team/tests.rs` and `core/src/tools/handlers/multi_agents_tests.rs`.
 
-## Gaps To Address Next
+## Implemented In This Slice
 
-- The first code batch still needs a narrower implementation target than the original cross-cutting governance and protocol scope.
-- Root-level operator documents are present but not yet fully normalized around one canonical naming and recovery path.
-- Windows-local validation rules are known in practice but need to be carried as first-class project artifacts for future batches and review handoffs.
-- Full completion criteria for local validation still depend on targeted `cargo` checks/tests because some `just` recipes are not reliable in the current Windows shell setup.
+- `codex-rs/core/src/team/runtime.rs` now requires the handoff manifest plus `status.json`, `handoff.json`, `team-tape.jsonl`, `AGENT.md`, and `AGENT_TEAM.md` to remain both declared and present on disk before `atomicWorkflows` delivery can succeed.
+- `codex-rs/core/src/team/tests.rs` now covers both the positive persisted-checkpoint path and the negative manifest-deletion regression.
+- Root team initialization now regenerates runtime-owned `SKILL.md` files with valid frontmatter-first layout and preserves broken legacy skill content under a marker instead of overwriting it.
+- Windows-sensitive `control` and `multi_agents` tests now use safer local cwd handling so the targeted validation set is viable after the rebase.
 
 ## Prioritized Findings
 
@@ -45,7 +45,7 @@
 - Current decision:
   - Keep this as a follow-on slice, not the first implementation batch.
 
-### P1: `atomicWorkflows` trusts declared checkpoint refs more than persisted files
+### P1: `atomicWorkflows` trusted declared checkpoint refs more than persisted files
 
 - Source:
   - `codex-rs/core/src/team/runtime.rs`
@@ -54,7 +54,7 @@
   - A handoff can satisfy the atomic workflow gate with stale `artifact_refs` even if required checkpoint files were deleted after being declared.
   - That weakens the repository's artifact-first recovery contract because finalize and integration-ready transitions can proceed without real persisted checkpoints.
 - Current decision:
-  - This is the selected first implementation slice.
+  - Closed in the current working tree and validated with focused tests.
 
 ### P2: replan detection is still too trigger-word dependent
 
@@ -74,34 +74,43 @@
   - It stays within the current `team/runtime.rs` and `team/tests.rs` boundary without expanding the public protocol surface.
   - It gives Design, Development, and Review a clean acceptance target before broader spawn/handoff or session-visibility work.
 - Target behavior:
-  - `atomicWorkflows` must reject finalize or handoff when any required checkpoint path is missing on disk, even if the path is still present in `prepared.artifact_refs`.
+  - `atomicWorkflows` must reject finalize or handoff when the handoff manifest or any of `status.json`, `handoff.json`, `team-tape.jsonl`, `AGENT.md`, or `AGENT_TEAM.md` is missing on disk, even if the path is still present in `prepared.artifact_refs`.
 - Initial file boundary:
   - `codex-rs/core/src/team/runtime.rs`
   - `codex-rs/core/src/team/tests.rs`
   - `codex-rs/core/src/team/state.rs` as reference only unless implementation proves otherwise
 
-## Pre-Code Document Gate
+## Validation Executed
 
-- `CURRENT-STAGE.md` records the active mode, current assumptions, blockers, and next step for compact recovery.
-- `IMPLEMENTATION-REVIEW.md` records the prioritized findings and chosen first slice before coding starts.
-- `openspec/changes/stabilize-team-workflow-rd-loop/design.md` and `tasks.md` must be updated to the selected first slice before any Rust edit lands.
+- `cargo test -p codex-core atomic_workflow_`
+- `cargo test -p codex-core workflow_loader_accepts_openspec_artifacts_cross_level_handoff_alias`
+- `cargo test -p codex-core root_team_initialization_persists_state_and_governance_docs`
+- `cargo test -p codex-core root_team_initialization_repairs_legacy_skill_wrapper_layout`
+- `cargo test -p codex-core compact_checkpoint_and_resume_enforce_artifact_first_recovery`
+- `cargo test -p codex-core public_team_session_exposes_root_only_lifecycle_summary`
+- `cargo test -p codex-core multi_agent_v2_spawn_returns_path_and_send_input_accepts_relative_path`
+- `cargo test -p codex-core spawn_agent_rejects_when_depth_limit_exceeded`
+- `cargo test -p codex-core resume_agent_rejects_when_depth_limit_exceeded`
+- `cargo test -p codex-core spawn_thread_subagent_gets_random_nickname_in_session_source`
+- `cargo test -p codex-core spawn_agent_can_fork_parent_thread_history`
+- `cargo test -p codex-core resume_closed_child_reopens_open_descendants`
+- `cargo test -p codex-core resume_agent_from_rollout_reads_archived_rollout_path`
+- `cargo clippy --fix --tests --allow-dirty -p codex-core`
+- `cargo fmt`
+- `tools/argument-comment-lint/run.sh -p codex-core` via Git Bash with `.venv-tools`
 
-## Test Surface Snapshot
+## Residual Risks
 
-- Confirmed viable locally:
-  - `cargo fmt`
-  - `cargo test -p codex-app-server-protocol`
-  - `cargo check -p codex-core`
-  - focused `codex-core` exact tests for `team` and `multi_agents`
-- Not currently a reliable local completion gate:
-  - POSIX-shell-backed `just` recipes on this Windows machine
-  - treating the entire `codex-core` suite as a stable Windows-wide gate without targeted triage
+- The handoff manifest is still inferred from `prepared.artifact_refs.first()` instead of a typed field. That ordering contract is stable enough for this slice but should become explicit in a follow-up change.
+- Legacy skill repair preserves broken content under a marker rather than structurally migrating it. That fixes the current loader failure but may leave duplicated legacy guidance for later cleanup.
+- `just` is still not a reliable Windows completion gate because the local shell resolution is incomplete; this cycle depended on `cargo` fallbacks and Git Bash for the linter wrapper.
+- Full `cargo test -p codex-core` was not re-established as the Windows-wide completion gate for this slice. The accepted evidence remains the targeted test set above.
 
-## Risks
+## Review Outcome
 
-- The codebase already contains workflow semantics; if docs/specs drift from the implemented runtime, Design and Review will diverge quickly.
-- Duplicate or inconsistent root-level workflow document names will weaken compact recovery and delegation quality.
-- Environment-specific validation rules can be forgotten during iteration unless they are captured in canonical docs and referenced from tasks/review handoff.
+- Design confirmed the slice should stay bounded to the exact six-checkpoint contract and that OpenSpec wording must enumerate the checkpoint set explicitly.
+- Development completed the runtime enforcement, focused tests, skill-wrapper repair, and Windows-targeted test stabilization within the bounded scope.
+- Review found no remaining blocker in the implemented areas. The remaining items are follow-up risks, not reasons to return this slice to development.
 
 ## Role Boundaries For The Next Iteration
 
@@ -113,9 +122,8 @@
 
 ### Development
 
-- Implement only after the proposal/spec/design/tasks contract is updated to the selected first slice.
-- Keep code changes bounded to `codex-rs/core/src/team/runtime.rs` and focused tests unless the implementation proves a documented dependency.
-- Record exact Windows-local commands, outputs, and cleanup steps for Review.
+- Commit the bounded implementation plus focused validation evidence without reopening broader protocol or spawn-sequencing work.
+- Keep the next batch centered on deferred findings instead of widening this completed checkpoint-enforcement slice retroactively.
 
 ### Review
 
