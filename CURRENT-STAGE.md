@@ -25,15 +25,16 @@ The current product and code direction is to stabilize the `team-workflow` runti
 
 ## Current Blockers
 
-- The exact next implementation delta after the recent handoff fixes still needs to be turned into explicit proposal/spec/design/tasks artifacts.
+- The next bounded implementation slice still needs to be selected from the existing review baseline and task list before coding starts.
+- Root workflow documents still have some duplicate names, so this iteration needs a canonical recovery path that does not depend on stale aliases.
 - Some repo recipes depend on POSIX shell execution, so local Windows validation must document cargo-first fallbacks where `just` cannot execute.
 - The full `codex-core` suite is not yet treated as a reliable Windows completion gate; targeted validation remains necessary until the next batch tightens that story.
 
 ## Next Intended Step
 
-1. Write `LOCAL-DEV.md` for Windows environment, virtualenv, test, and cleanup rules.
-2. Generate OpenSpec proposal/specs/design/tasks for `stabilize-team-workflow-rd-loop`.
-3. Use those artifacts to assign explicit Design, Development, and Review workstreams before any coding starts.
+1. Finalize the canonical recovery set for this iteration: `TEAM-ORCHESTRATION.md`, `CURRENT-STAGE.md`, `LOCAL-DEV.md`, and `IMPLEMENTATION-REVIEW.md`.
+2. Sync the active OpenSpec artifacts so they reference that same recovery set and the current capability/spec contract.
+3. Assign explicit Design, Development, and Review ownership for the first bounded implementation slice before any coding starts.
 
 ## Compact Recovery
 
@@ -41,5 +42,7 @@ On resume:
 
 1. Read this file first.
 2. Read `TEAM-ORCHESTRATION.md`.
-3. Read the active OpenSpec artifacts for `stabilize-team-workflow-rd-loop`.
-4. Continue from the recorded next step, not hidden chat state.
+3. Read `IMPLEMENTATION-REVIEW.md`.
+4. Read `LOCAL-DEV.md`.
+5. Read the active OpenSpec artifacts for `stabilize-team-workflow-rd-loop`.
+6. Continue from the recorded next step, not hidden chat state.
