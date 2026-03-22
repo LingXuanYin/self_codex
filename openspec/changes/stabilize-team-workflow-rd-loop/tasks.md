@@ -1,24 +1,16 @@
 ## 1. Workflow Baseline
 
-- [ ] 1.1 Re-read `TEAM-ORCHESTRATION.md`, `CURRENT-STAGE.md`, `IMPLEMENTATION-REVIEW.md`, `LOCAL-DEV.md`, and the active OpenSpec artifacts before implementation starts and update any stale assumptions
-- [ ] 1.2 Confirm the active OpenSpec artifacts still match the implementation target before editing code
-- [ ] 1.3 Define the exact design/development/review evidence package that must be produced for this iteration
+- [x] 1.1 Re-read `TEAM-ORCHESTRATION.md`, `CURRENT-STAGE.md`, `IMPLEMENTATION-REVIEW.md`, `LOCAL-DEV.md`, and the active OpenSpec artifacts before implementation starts
+- [x] 1.2 Confirm the first implementation target is `atomic-checkpoint-existence-enforcement` and keep the active branch/change aligned to that scope
+- [x] 1.3 Record the design, development, and review evidence package in committed repo-root and OpenSpec artifacts before Rust edits begin
 
-## 2. Governance And Recovery Implementation
+## 2. Atomic Checkpoint Enforcement
 
-- [ ] 2.1 Audit `codex-rs/core/src/team/config.rs`, `state.rs`, and related runtime entry points against the new governance spec
-- [ ] 2.2 Implement any missing behavior needed to keep triad workflow state and compact recovery aligned with committed root-level artifacts and runtime state
-- [ ] 2.3 Add or update focused tests for governance, recovery ordering, and review-gate evidence handling
+- [x] 2.1 Audit `codex-rs/core/src/team/runtime.rs`, `codex-rs/core/src/team/state.rs`, and `codex-rs/core/src/team/tests.rs` around `atomicWorkflows` and persisted checkpoint expectations
+- [ ] 2.2 Update the atomic workflow delivery gate so required checkpoint files must both be declared in `prepared.artifact_refs` and exist on disk before finalize or handoff succeeds
+- [ ] 2.3 Add or update focused tests in `codex-rs/core/src/team/tests.rs` that delete required checkpoint files after message preparation and assert `atomicWorkflows` blocks delivery
 
-## 3. Handoff And Visibility Stabilization
+## 3. Validation And Review
 
-- [ ] 3.1 Audit `codex-rs/core/src/team/runtime.rs` and `tools/handlers/multi_agents/*` against the handoff spec
-- [ ] 3.2 Implement any missing same-level A2A, vertical `openspec-artifacts`, path-sanitization, or public-visibility fixes
-- [ ] 3.3 Update `codex-rs/app-server-protocol` and generated schema fixtures if the public contract changes
-- [ ] 3.4 Add or update focused unit and end-to-end tests for sibling handoffs, vertical handoffs, public workflow session behavior, and Windows-local recovery flow
-
-## 4. Verification And Review
-
-- [ ] 4.1 Run the relevant crate-local unit tests and required end-to-end scenarios on Windows using the documented root-level virtual environment
-- [ ] 4.2 Run formatting, lint/fix steps, and any feasible lock/schema checks permitted by the environment and repo policy, documenting any Windows-specific fallbacks
-- [ ] 4.3 Record cleanup status, unresolved trade-offs, and review findings before concluding the iteration
+- [ ] 3.1 Run the relevant Windows-local formatting and targeted `codex-core` validation commands using the documented root-level virtual environment
+- [ ] 3.2 Record validation outcomes, cleanup status, and residual review findings for this slice before taking the next batch
