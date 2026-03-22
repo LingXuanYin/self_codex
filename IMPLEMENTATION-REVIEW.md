@@ -43,7 +43,7 @@
 - Risk:
   - If child spawn fails after workflow-side preparation, the parent can be left with ghost handoff artifacts that imply a child was created when it was not.
 - Current decision:
-  - Keep this as a follow-on slice, not the first implementation batch.
+  - Promote this to the next implementation slice, with cleanup-on-failure as the current minimal repair hypothesis.
 
 ### P1: `atomicWorkflows` trusted declared checkpoint refs more than persisted files
 
@@ -79,6 +79,30 @@
   - `codex-rs/core/src/team/runtime.rs`
   - `codex-rs/core/src/team/tests.rs`
   - `codex-rs/core/src/team/state.rs` as reference only unless implementation proves otherwise
+
+## Selected Next Slice
+
+- Slice name: `spawn-agent-failed-handoff-cleanup`
+- Reason:
+  - `spawn_agent` currently calls `prepare_child_team_spawn` before `spawn_agent_with_metadata` succeeds.
+  - `prepare_vertical_handoff` writes the handoff manifest immediately, mirrors artifacts to the operator surface, and can emit an integration patch before the child thread exists.
+  - Existing coverage confirms the happy-path manifest contract, but there is not yet a regression test proving failed spawn leaves no ghost handoff artifacts behind.
+- Target behavior:
+  - Failed `spawn_agent` attempts SHALL not leave a new `spawn-*.md` handoff manifest or its operator-visible mirror behind when the child thread was never created.
+- Minimum safe fix boundary:
+  - `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs`
+  - `codex-rs/core/src/team/runtime.rs`
+  - `codex-rs/core/src/tools/handlers/multi_agents_tests.rs`
+- Non-goals:
+  - changing the vertical manifest format or `openspec-artifacts` protocol
+  - redesigning the full successful child bootstrap lifecycle
+  - broad cleanup of manifest typing or legacy skill migration follow-ups
+
+## Proposed Validation For The Next Slice
+
+- Add a failing-spawn regression under `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` with team workflow enabled and a forced spawn failure, then assert no new `spawn-*.md` artifact remains under the parent team artifact directory.
+- Extend the regression to assert the corresponding operator-visible mirrored artifact is also absent after failure.
+- Re-run the existing successful manifest handoff test so the child still receives the `openspec-artifacts` manifest on the happy path.
 
 ## Validation Executed
 
@@ -116,17 +140,17 @@
 
 ### Design
 
-- Translate the selected first slice into bounded behavior, non-goals, acceptance criteria, and a focused test plan.
-- Normalize which root-level documents are canonical for recovery and handoff.
-- Keep the initial code batch scoped to artifact-first checkpoint enforcement instead of reopening protocol shape questions.
+- Translate the selected next slice into bounded cleanup behavior, non-goals, acceptance criteria, and a focused test plan.
+- Confirm that cleanup-on-failure is sufficient; return to design instead of widening scope if implementation shows the spawn ordering itself must change.
+- Keep the next code batch scoped to failed-spawn ghost artifact cleanup instead of reopening broader protocol shape questions.
 
 ### Development
 
-- Commit the bounded implementation plus focused validation evidence without reopening broader protocol or spawn-sequencing work.
-- Keep the next batch centered on deferred findings instead of widening this completed checkpoint-enforcement slice retroactively.
+- Commit the bounded implementation plus focused validation evidence without reopening broader workflow hardening work.
+- Keep the next batch centered on failed-spawn ghost artifact cleanup.
 
 ### Review
 
 - Validate that each substantive batch shows evidence from Design, Development, and Review.
-- Check that atomic workflow enforcement now depends on persisted checkpoint existence rather than stale declarations alone.
+- Check that failed `spawn_agent` paths no longer leave ghost handoff artifacts behind.
 - Reject batches that lack recovery notes, targeted test evidence, or cleanup status.
