@@ -97,7 +97,7 @@ This batch intentionally does not span every boundary above. The current impleme
 ### Decision: Follow atomic checkpoint hardening with spawn ghost-artifact hardening
 
 - Decision:
-  - The next implementation batch will change the `spawn_agent` bootstrap flow so sanitized child handoff content can be prepared in memory, but spawn manifests, integration patches, mirrored operator files, and delegation bookkeeping are persisted only after `spawn_agent_with_metadata` succeeds.
+- The next implementation batch will change the `spawn_agent` bootstrap flow so sanitized child handoff content can be prepared in memory, but spawn manifests, integration patches, mirrored operator files, and delegation bookkeeping are persisted only after `spawn_agent_with_metadata` succeeds.
 - Why:
   - `spawn.rs` currently calls `prepare_child_team_spawn` before `spawn_agent_with_metadata`.
   - `prepare_child_team_spawn` delegates to `prepare_vertical_handoff`, which writes a manifest to disk and mirrors operator-visible files immediately.
@@ -124,6 +124,7 @@ This batch intentionally does not span every boundary above. The current impleme
 - [Windows shell drift for `just` workflows] -> Mitigation: document exact fallback command patterns and isolate the impact in `LOCAL-DEV.md`.
 - [Spec/doc drift from implementation] -> Mitigation: treat proposal/specs/design/tasks as preconditions for coding and update them before any scope change.
 - [Ghost spawn artifacts after failed child creation] -> Mitigation: add a focused failure-path test that proves no new spawn manifest, patch, or mirror survives a spawn failure under team workflow mode.
+- [Adjacent post-spawn recording failure] -> Mitigation: explicitly defer `record_child_team_spawn` compensation to a follow-up slice unless the bounded two-phase path proves insufficient.
 
 ## Migration Plan
 
@@ -144,6 +145,7 @@ Rollback strategy:
 ## Open Questions
 
 - Should the side-effect-free spawn preview step stay local to `spawn.rs` or move into a reusable team-runtime helper for other pre-delivery failure paths?
+- Does any part of the current spawn-path bookkeeping still need compensation after child creation, or can that stay deferred to a later slice without weakening this batch's contract?
 - Which additional handoff lifecycle regressions should become follow-on slices after spawn-failure cleanup lands?
 - Which end-to-end scenarios are the minimum credible set for Windows in this environment without overfitting to local shell constraints?
 
