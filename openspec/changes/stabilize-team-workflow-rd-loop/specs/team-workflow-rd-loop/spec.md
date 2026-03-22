@@ -13,6 +13,8 @@ artifacts before coding starts.
 - **AND** the repository SHALL record the active branch, active change,
   assumptions, blockers, and next step in committed recovery-oriented
   documents
+- **AND** the canonical root-level workflow documents SHALL be discoverable
+  from the repository root
 
 ### Requirement: Recovery state is recorded in committed artifacts
 The active team state SHALL be recoverable from committed repository documents
@@ -23,6 +25,22 @@ and OpenSpec artifacts rather than hidden chat context.
 - **THEN** the lead SHALL be able to recover the active mode, assumptions,
   blockers, and next step by reading the committed governance documents and
   the active OpenSpec change artifacts
+
+### Requirement: Windows local development uses a documented root-level baseline
+The active iteration SHALL use a documented Windows local-development baseline
+that avoids Docker, uses a root-level virtual environment, and records the
+validation and cleanup expectations needed for repeatable execution.
+
+#### Scenario: Local environment is prepared for development
+- **WHEN** a development batch is about to start on Windows
+- **THEN** the repository SHALL document the root-level virtual environment,
+  required environment variables, and preferred command patterns
+- **AND** the documented baseline SHALL not depend on Docker
+
+#### Scenario: Local validation is handed to review
+- **WHEN** Development hands a batch to Review
+- **THEN** the iteration artifacts SHALL record the Windows-local validation
+  path and any cleanup actions or environment-specific constraints that remain
 
 ### Requirement: Review gates each development batch
 The workflow SHALL require review findings, validation outcomes, and
