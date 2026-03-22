@@ -1,6 +1,6 @@
 ## 1. Workflow Baseline
 
-- [ ] 1.1 Re-read `.codex/AGENT_TEAM.md`, `.codex/team-workflow.yaml`, `LOCAL_ENV.md`, and the active OpenSpec artifacts before implementation starts and update any stale assumptions
+- [ ] 1.1 Re-read `TEAM-ORCHESTRATION.md`, `CURRENT-STAGE.md`, `IMPLEMENTATION-REVIEW.md`, `LOCAL-DEV.md`, and the active OpenSpec artifacts before implementation starts and update any stale assumptions
 - [ ] 1.2 Confirm the active OpenSpec artifacts still match the implementation target before editing code
 - [ ] 1.3 Define the exact design/development/review evidence package that must be produced for this iteration
 
