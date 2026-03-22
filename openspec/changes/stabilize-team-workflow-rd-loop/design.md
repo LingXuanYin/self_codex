@@ -12,7 +12,8 @@ This iteration must start from a document-first workflow because the user explic
 
 The repository already has a natural technical split:
 
-- governance and recovery policy in `team/config.rs`, `team/state.rs`, and root docs
+- governance and recovery policy in `team/config.rs`, `team/state.rs`,
+  `.codex/AGENT_TEAM.md`, `.codex/team-workflow.yaml`, and `LOCAL_ENV.md`
 - runtime orchestration in `team/runtime.rs`
 - operator/public projection in `team/api.rs`
 - tool-surface enforcement in `tools/handlers/multi_agents/*`
@@ -39,22 +40,27 @@ The repository already has a natural technical split:
 ### Decision: Treat repository documents as first-class workflow state
 
 - Decision:
-  - Use committed root-level Markdown files plus OpenSpec artifacts as the canonical recovery surface before implementation starts.
+  - Use committed repo-root governance files plus OpenSpec artifacts as the
+    canonical recovery surface before implementation starts.
 - Why:
   - The user requires compact recovery from documents.
-  - The repo already persists `.codex` team state, but repository-visible artifacts are better for cross-role review and branch-local iteration.
+  - The repo already persists `.codex` team state, but committed governance
+    artifacts are better for cross-role review and branch-local iteration.
 - Alternatives considered:
   - Rely only on `.codex/team-state` runtime files.
     - Rejected because they are runtime-oriented and weaker for human review handoff.
   - Rely on chat context alone.
     - Rejected because it fails the compact-recovery requirement.
 
-### Decision: Keep one OpenSpec change with multiple focused capabilities
+### Decision: Keep one OpenSpec change with one focused capability
 
 - Decision:
-  - Use one change, `stabilize-team-workflow-rd-loop`, with separate capabilities for governance and handoffs.
+  - Use one change, `stabilize-team-workflow-rd-loop`, with one focused
+    capability that covers the triad loop, recovery surface, and handoff
+    expectations for the active `team-workflow` line.
 - Why:
-  - Governance and handoffs are coupled in implementation but need separate requirements and tests.
+  - Governance, recovery, and handoffs are coupled in implementation and can
+    be tested as one bounded workflow capability in this batch.
 - Alternatives considered:
   - Split governance and handoffs into separate changes.
     - Rejected because the same iteration must review the entire design/development/review loop together.
@@ -101,7 +107,7 @@ The repository already has a natural technical split:
 
 ## Migration Plan
 
-1. Commit root-level workflow and recovery docs.
+1. Commit repo-root workflow and recovery docs.
 2. Commit OpenSpec artifacts that define the scope and testable requirements.
 3. Implement the runtime/handler/protocol changes needed to satisfy the specs.
 4. Run focused crate tests, then required end-to-end checks.
@@ -109,8 +115,10 @@ The repository already has a natural technical split:
 
 Rollback strategy:
 
-- Revert the implementation commits while preserving the documentation commits if the docs remain valid for the next attempt.
-- If the design itself is invalidated, update the OpenSpec and root-level docs in follow-up commits before retrying.
+- Revert the implementation commits while preserving the documentation commits
+  if the docs remain valid for the next attempt.
+- If the design itself is invalidated, update the OpenSpec and repo-root docs
+  in follow-up commits before retrying.
 
 ## Open Questions
 
