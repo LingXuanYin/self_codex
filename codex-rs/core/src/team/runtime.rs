@@ -59,6 +59,18 @@ pub(crate) enum TeamRelationship {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct PreparedVerticalHandoffPersistence {
+    manifest_markdown: String,
+    patch_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerticalHandoffPersistence {
+    Immediate,
+    AfterChildSpawn,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct PreparedTeamMessage {
     pub relationship: TeamRelationship,
     pub items: Vec<UserInput>,
@@ -66,6 +78,7 @@ pub(crate) struct PreparedTeamMessage {
     pub artifact_refs: Vec<PathBuf>,
     pub integration_handoff: Option<TeamIntegrationHandoff>,
     pub a2a_envelope: Option<TeamA2aEnvelope>,
+    pub deferred_persistence: Option<PreparedVerticalHandoffPersistence>,
 }
 
 pub(crate) async fn maybe_initialize_for_thread(
@@ -126,6 +139,7 @@ pub(crate) async fn prepare_child_team_spawn(
         /*receiver_team_id*/ None,
         items,
         "spawn",
+        VerticalHandoffPersistence::AfterChildSpawn,
     )
     .await
 }
@@ -147,6 +161,7 @@ pub(crate) async fn prepare_team_message(
             artifact_refs: Vec::new(),
             integration_handoff: None,
             a2a_envelope: None,
+            deferred_persistence: None,
         });
     };
     let Some(receiver) =
@@ -159,6 +174,7 @@ pub(crate) async fn prepare_team_message(
             artifact_refs: Vec::new(),
             integration_handoff: None,
             a2a_envelope: None,
+            deferred_persistence: None,
         });
     };
     let relationship = determine_relationship(&sender.record, &receiver.record);
@@ -191,6 +207,7 @@ pub(crate) async fn prepare_team_message(
             artifact_refs: Vec::new(),
             integration_handoff: None,
             a2a_envelope: None,
+            deferred_persistence: None,
         }),
         TeamRelationship::Vertical | TeamRelationship::SeparateBoundary => {
             prepare_vertical_handoff(
@@ -199,6 +216,7 @@ pub(crate) async fn prepare_team_message(
                 Some(&receiver.record.team_id),
                 items,
                 "handoff",
+                VerticalHandoffPersistence::Immediate,
             )
             .await
         }
@@ -263,8 +281,6 @@ pub(crate) async fn record_child_team_spawn(
     child.handoff.updated_at = now.clone();
     write_team_state_bundle(&parent).await?;
     write_team_state_bundle(&child).await?;
-    sync_operator_surface(&parent).await?;
-    sync_operator_surface(&child).await?;
     append_team_tape_entry(
         &parent.record.workspace_root,
         &parent.record.team_id,
@@ -290,7 +306,54 @@ pub(crate) async fn record_child_team_spawn(
         .await?;
     }
     refresh_team_documents(workspace_root, &parent.record.team_id).await?;
-    refresh_team_documents(workspace_root, &child.record.team_id).await
+    refresh_team_documents(workspace_root, &child.record.team_id).await?;
+    persist_prepared_vertical_handoff(&parent, prepared).await?;
+    sync_operator_surface(&parent).await?;
+    sync_operator_surface(&child).await
+}
+
+async fn persist_prepared_vertical_handoff(
+    sender: &TeamStateBundle,
+    prepared: &PreparedTeamMessage,
+) -> io::Result<()> {
+    let Some(deferred_persistence) = prepared.deferred_persistence.as_ref() else {
+        return Ok(());
+    };
+    persist_vertical_handoff_artifacts(
+        sender,
+        prepared.artifact_refs.as_slice(),
+        prepared.integration_handoff.as_ref(),
+        deferred_persistence,
+    )
+    .await
+}
+
+async fn persist_vertical_handoff_artifacts(
+    sender: &TeamStateBundle,
+    artifact_refs: &[PathBuf],
+    integration_handoff: Option<&TeamIntegrationHandoff>,
+    persistence: &PreparedVerticalHandoffPersistence,
+) -> io::Result<()> {
+    let Some(manifest_path) = artifact_refs.first() else {
+        return Ok(());
+    };
+    if let Some(parent) = manifest_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    fs::write(manifest_path, &persistence.manifest_markdown).await?;
+    if let Some(integration) = integration_handoff
+        && let Some(patch_path) = integration.patch_path.as_ref()
+        && let Some(patch_bytes) = persistence.patch_bytes.as_ref()
+    {
+        if let Some(parent) = patch_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::write(patch_path, patch_bytes).await?;
+    }
+    for artifact_ref in artifact_refs {
+        mirror_operator_file(sender, artifact_ref).await?;
+    }
+    Ok(())
 }
 
 fn enforce_transition_policies(
@@ -1907,6 +1970,7 @@ async fn prepare_same_level_a2a(
         artifact_refs: envelope.artifact_refs.clone(),
         integration_handoff: None,
         a2a_envelope: Some(envelope),
+        deferred_persistence: None,
     })
 }
 
@@ -2183,6 +2247,7 @@ async fn prepare_vertical_handoff(
     receiver_team_id: Option<&str>,
     items: Vec<UserInput>,
     prefix: &str,
+    persistence: VerticalHandoffPersistence,
 ) -> io::Result<PreparedTeamMessage> {
     let Some(sender) = load_team_state_bundle(workspace_root, sender_team_id).await? else {
         return Ok(PreparedTeamMessage {
@@ -2192,6 +2257,7 @@ async fn prepare_vertical_handoff(
             artifact_refs: Vec::new(),
             integration_handoff: None,
             a2a_envelope: None,
+            deferred_persistence: None,
         });
     };
     let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
@@ -2205,11 +2271,8 @@ async fn prepare_vertical_handoff(
         .paths
         .artifacts_dir
         .join(format!("{prefix}-{timestamp}-to-{receiver_suffix}.md"));
-    if let Some(parent) = artifact_path.parent() {
-        fs::create_dir_all(parent).await?;
-    }
     let summary = sanitize_user_input_summary_for_export(&items, workspace_root);
-    let integration_handoff =
+    let (integration_handoff, patch_bytes) =
         build_integration_handoff(&sender, receiver_bundle.as_ref(), &timestamp.to_string())
             .await?;
     let mut artifact_refs = vec![
@@ -2231,20 +2294,29 @@ async fn prepare_vertical_handoff(
         integration_handoff.as_ref(),
         workspace_root,
     );
-    fs::write(
-        &artifact_refs[0],
-        build_vertical_handoff_markdown(
+    let prepared_persistence = PreparedVerticalHandoffPersistence {
+        manifest_markdown: build_vertical_handoff_markdown(
             &sender,
             &summary,
             artifact_refs.as_slice(),
             integration_handoff.as_ref(),
             workspace_root,
         ),
-    )
-    .await?;
-    for artifact_ref in &artifact_refs {
-        mirror_operator_file(&sender, artifact_ref).await?;
-    }
+        patch_bytes,
+    };
+    let deferred_persistence = match persistence {
+        VerticalHandoffPersistence::Immediate => {
+            persist_vertical_handoff_artifacts(
+                &sender,
+                artifact_refs.as_slice(),
+                integration_handoff.as_ref(),
+                &prepared_persistence,
+            )
+            .await?;
+            None
+        }
+        VerticalHandoffPersistence::AfterChildSpawn => Some(prepared_persistence),
+    };
     Ok(PreparedTeamMessage {
         relationship: TeamRelationship::Vertical,
         summary,
@@ -2255,6 +2327,7 @@ async fn prepare_vertical_handoff(
         artifact_refs,
         integration_handoff,
         a2a_envelope: None,
+        deferred_persistence,
     })
 }
 
@@ -2262,9 +2335,9 @@ async fn build_integration_handoff(
     sender: &TeamStateBundle,
     receiver: Option<&TeamStateBundle>,
     timestamp: &str,
-) -> io::Result<Option<TeamIntegrationHandoff>> {
+) -> io::Result<(Option<TeamIntegrationHandoff>, Option<Vec<u8>>)> {
     let Some(worktree) = sender.record.worktree.as_ref() else {
-        return Ok(None);
+        return Ok((None, None));
     };
     let can_export_patch = worktree.managed
         && worktree.repo_root.is_some()
@@ -2285,7 +2358,17 @@ async fn build_integration_handoff(
         .filter(|commit| !commit.is_empty());
     let base_commit = worktree.base_commit.clone();
     let patch_path = if can_export_patch {
-        Some(write_integration_patch(sender, worktree, timestamp).await?)
+        Some(
+            sender
+                .paths
+                .artifacts_dir
+                .join(format!("integration-{timestamp}.patch")),
+        )
+    } else {
+        None
+    };
+    let patch_bytes = if can_export_patch {
+        Some(render_integration_patch_bytes(worktree).await?)
     } else {
         None
     };
@@ -2313,7 +2396,7 @@ async fn build_integration_handoff(
         sender.record.kind.clone(),
     );
 
-    Ok(Some(TeamIntegrationHandoff {
+    let integration_handoff = TeamIntegrationHandoff {
         source_team_id: source_public_id.clone(),
         target_team_id: receiver.map(|bundle| {
             public_team_ref(
@@ -2339,18 +2422,12 @@ async fn build_integration_handoff(
         ],
         review_ready: true,
         updated_at: Utc::now().to_rfc3339(),
-    }))
+    };
+
+    Ok((Some(integration_handoff), patch_bytes))
 }
 
-async fn write_integration_patch(
-    sender: &TeamStateBundle,
-    worktree: &TeamWorktreeState,
-    timestamp: &str,
-) -> io::Result<PathBuf> {
-    let patch_path = sender
-        .paths
-        .artifacts_dir
-        .join(format!("integration-{timestamp}.patch"));
+async fn render_integration_patch_bytes(worktree: &TeamWorktreeState) -> io::Result<Vec<u8>> {
     let diff_args = if let Some(base_commit) = worktree.base_commit.as_deref() {
         vec![
             "diff".to_string(),
@@ -2374,8 +2451,7 @@ async fn write_integration_patch(
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    fs::write(&patch_path, output.stdout).await?;
-    Ok(patch_path)
+    Ok(output.stdout)
 }
 
 fn render_integration_manifest(integration: &TeamIntegrationHandoff) -> String {

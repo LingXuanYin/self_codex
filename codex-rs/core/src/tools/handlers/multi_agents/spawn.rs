@@ -38,12 +38,6 @@ impl ToolHandler for Handler {
             .map(str::trim)
             .filter(|role| !role.is_empty());
         let input_items = parse_collab_input(args.message, args.items)?;
-        let prepared = prepare_child_team_spawn(&turn.cwd, session.conversation_id, input_items)
-            .await
-            .map_err(|err| {
-                FunctionCallError::RespondToModel(format!("team workflow error: {err}"))
-            })?;
-        let prompt = prepared.summary.clone();
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
         let max_depth = effective_agent_max_depth(turn.as_ref()).await?;
@@ -52,6 +46,12 @@ impl ToolHandler for Handler {
                 "Agent depth limit reached. Solve the task yourself.".to_string(),
             ));
         }
+        let prepared = prepare_child_team_spawn(&turn.cwd, session.conversation_id, input_items)
+            .await
+            .map_err(|err| {
+                FunctionCallError::RespondToModel(format!("team workflow error: {err}"))
+            })?;
+        let prompt = prepared.summary.clone();
         session
             .send_event(
                 &turn,
@@ -65,41 +65,44 @@ impl ToolHandler for Handler {
                 .into(),
             )
             .await;
-        let mut config =
-            build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-        apply_requested_spawn_agent_model_overrides(
-            &session,
-            turn.as_ref(),
-            &mut config,
-            args.model.as_deref(),
-            args.reasoning_effort,
-        )
-        .await?;
-        apply_role_to_config(&mut config, role_name)
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
-        apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
-        apply_spawn_agent_overrides(&mut config, child_depth, max_depth);
-
-        let result = session
-            .services
-            .agent_control
-            .spawn_agent_with_metadata(
-                config,
-                prepared.items.clone(),
-                Some(thread_spawn_source(
-                    session.conversation_id,
-                    &turn.session_source,
-                    child_depth,
-                    role_name,
-                    args.task_name.clone(),
-                )?),
-                SpawnAgentOptions {
-                    fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
-                },
+        let result = async {
+            let mut config =
+                build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
+            apply_requested_spawn_agent_model_overrides(
+                &session,
+                turn.as_ref(),
+                &mut config,
+                args.model.as_deref(),
+                args.reasoning_effort,
             )
-            .await
-            .map_err(collab_spawn_error);
+            .await?;
+            apply_role_to_config(&mut config, role_name)
+                .await
+                .map_err(FunctionCallError::RespondToModel)?;
+            apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+            apply_spawn_agent_overrides(&mut config, child_depth, max_depth);
+
+            session
+                .services
+                .agent_control
+                .spawn_agent_with_metadata(
+                    config,
+                    prepared.items.clone(),
+                    Some(thread_spawn_source(
+                        session.conversation_id,
+                        &turn.session_source,
+                        child_depth,
+                        role_name,
+                        args.task_name.clone(),
+                    )?),
+                    SpawnAgentOptions {
+                        fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
+                    },
+                )
+                .await
+                .map_err(collab_spawn_error)
+        }
+        .await;
         let (new_thread_id, new_agent_metadata, status) = match &result {
             Ok(spawned_agent) => (
                 Some(spawned_agent.thread_id),

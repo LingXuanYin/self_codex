@@ -14,6 +14,7 @@ use crate::protocol::Op;
 use crate::protocol::SandboxPolicy;
 use crate::protocol::SessionSource;
 use crate::protocol::SubAgentSource;
+use crate::team::load_public_team_workflow_session;
 use crate::team::maybe_initialize_for_thread;
 use crate::tools::context::ToolOutput;
 use crate::turn_diff_tracker::TurnDiffTracker;
@@ -36,6 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
+use walkdir::WalkDir;
 
 fn invocation(
     session: Arc<crate::codex::Session>,
@@ -101,6 +103,22 @@ fn init_git_repo(workspace: &Path) {
     std::fs::write(workspace.join("README.md"), "seed\n").expect("write readme");
     run_git(workspace, &["add", "README.md"]);
     run_git(workspace, &["commit", "-m", "init"]);
+}
+
+fn matching_files(root: &Path, prefix: &str, suffix: &str) -> Vec<PathBuf> {
+    let mut matches = WalkDir::new(root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .map(walkdir::DirEntry::into_path)
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(prefix) && name.ends_with(suffix))
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches
 }
 
 fn expect_text_output<T>(output: T) -> (String, Option<bool>)
@@ -294,6 +312,78 @@ async fn spawn_agent_errors_when_manager_dropped() {
         err,
         FunctionCallError::RespondToModel("collab manager unavailable".to_string())
     );
+}
+
+#[tokio::test]
+async fn failed_team_workflow_spawn_does_not_persist_handoff_artifacts() {
+    let (session, mut turn) = make_session_and_context().await;
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(temp_dir.path());
+    write_team_workflow(temp_dir.path());
+    let root_thread_id = session.conversation_id;
+    maybe_initialize_for_thread(temp_dir.path(), root_thread_id, &SessionSource::Exec, None)
+        .await
+        .expect("initialize sender team");
+    let mut config = (*turn.config).clone();
+    config.cwd = temp_dir.path().to_path_buf();
+    turn.cwd = temp_dir.path().to_path_buf();
+    turn.config = Arc::new(config);
+
+    let codex_root = temp_dir.path().join(".codex");
+    let team_state_root = codex_root.join("team-state");
+    let existing_spawn_manifests = matching_files(&team_state_root, "spawn-", ".md");
+    let existing_patches = matching_files(&codex_root, "integration-", ".patch");
+    let team_state_dir = team_state_root.join(root_thread_id.to_string());
+    let handoff_before =
+        std::fs::read_to_string(team_state_dir.join("handoff.json")).expect("read handoff");
+    let audit_before =
+        std::fs::read_to_string(team_state_dir.join("audit.json")).expect("read audit");
+    let tape_before =
+        std::fs::read_to_string(team_state_dir.join("team-tape.jsonl")).expect("read tape");
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({"message": "implement parser module"})),
+    );
+    let Err(err) = SpawnAgentHandler.handle(invocation).await else {
+        panic!("spawn should fail without a live manager");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel("collab manager unavailable".to_string())
+    );
+
+    let remaining_spawn_manifests = matching_files(&team_state_root, "spawn-", ".md");
+    let remaining_patches = matching_files(&codex_root, "integration-", ".patch");
+    assert_eq!(remaining_spawn_manifests, existing_spawn_manifests);
+    assert_eq!(remaining_patches, existing_patches);
+    let handoff_after =
+        std::fs::read_to_string(team_state_dir.join("handoff.json")).expect("read handoff");
+    let audit_after =
+        std::fs::read_to_string(team_state_dir.join("audit.json")).expect("read audit");
+    let tape_after =
+        std::fs::read_to_string(team_state_dir.join("team-tape.jsonl")).expect("read tape");
+    assert_eq!(handoff_after, handoff_before);
+    assert_eq!(audit_after, audit_before);
+    assert_eq!(tape_after, tape_before);
+
+    let public_session = load_public_team_workflow_session(temp_dir.path(), root_thread_id, 8)
+        .await
+        .expect("load public session")
+        .expect("session should exist");
+    assert_eq!(public_session.active_team_count, 1);
+    assert_eq!(public_session.handoff.active_delegate_count, 0);
+    assert_eq!(public_session.handoff.awaiting_review_count, 0);
+    assert!(
+        !public_session.lifecycle.blocked,
+        "failed spawn should not leave the root session blocked on a ghost child"
+    );
+    let public_session_json =
+        serde_json::to_string(&public_session).expect("serialize public session");
+    assert!(!public_session_json.contains("spawn-"));
+    assert!(!public_session_json.contains("integration-"));
 }
 
 #[tokio::test]
@@ -585,6 +675,63 @@ async fn spawn_agent_rejects_when_depth_limit_exceeded() {
 }
 
 #[tokio::test]
+async fn team_workflow_spawn_depth_limit_does_not_prepare_handoff_artifacts() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(temp_dir.path());
+    std::fs::create_dir_all(temp_dir.path().join(".codex")).expect("create .codex");
+    std::fs::write(
+        temp_dir.path().join(".codex").join("team-workflow.yaml"),
+        "version: 1\nmaxDepth: 1\n",
+    )
+    .expect("write team workflow");
+    let root_thread_id = session.conversation_id;
+    maybe_initialize_for_thread(temp_dir.path(), root_thread_id, &SessionSource::Exec, None)
+        .await
+        .expect("initialize sender team");
+    let mut config = (*turn.config).clone();
+    config.cwd = temp_dir.path().to_path_buf();
+    turn.cwd = temp_dir.path().to_path_buf();
+    turn.config = Arc::new(config);
+
+    let codex_root = temp_dir.path().join(".codex");
+    let team_state_root = codex_root.join("team-state");
+    let existing_spawn_manifests = matching_files(&team_state_root, "spawn-", ".md");
+    let existing_patches = matching_files(&codex_root, "integration-", ".patch");
+
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: root_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({"message": "implement parser module"})),
+    );
+    let Err(err) = SpawnAgentHandler.handle(invocation).await else {
+        panic!("spawn should fail when depth limit exceeded");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "Agent depth limit reached. Solve the task yourself.".to_string()
+        )
+    );
+
+    let remaining_spawn_manifests = matching_files(&codex_root, "spawn-", ".md");
+    let remaining_patches = matching_files(&codex_root, "integration-", ".patch");
+    assert_eq!(remaining_spawn_manifests, existing_spawn_manifests);
+    assert_eq!(remaining_patches, existing_patches);
+}
+
+#[tokio::test]
 async fn spawn_agent_allows_depth_up_to_configured_max_depth() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
@@ -654,6 +801,10 @@ async fn spawn_agent_uses_artifact_manifest_for_team_workflow_child_handoff() {
     config.cwd = temp_dir.path().to_path_buf();
     turn.cwd = temp_dir.path().to_path_buf();
     turn.config = Arc::new(config);
+    let codex_root = temp_dir.path().join(".codex");
+    let team_state_root = codex_root.join("team-state");
+    let existing_spawn_manifests = matching_files(&codex_root, "spawn-", ".md");
+    let existing_team_state_spawn_manifests = matching_files(&team_state_root, "spawn-", ".md");
 
     let invocation = invocation(
         Arc::new(session),
@@ -684,6 +835,16 @@ async fn spawn_agent_uses_artifact_manifest_for_team_workflow_child_handoff() {
     assert!(text.contains("protocol: openspec-artifacts"));
     assert!(text.contains("artifact: "));
     assert!(!text.contains("implement parser module"));
+    let remaining_spawn_manifests = matching_files(&codex_root, "spawn-", ".md");
+    let remaining_team_state_spawn_manifests = matching_files(&team_state_root, "spawn-", ".md");
+    assert_eq!(
+        remaining_team_state_spawn_manifests.len(),
+        existing_team_state_spawn_manifests.len() + 1
+    );
+    assert_eq!(
+        remaining_spawn_manifests.len(),
+        existing_spawn_manifests.len() + 2
+    );
 }
 
 #[tokio::test]
