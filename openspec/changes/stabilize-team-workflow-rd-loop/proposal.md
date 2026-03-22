@@ -1,41 +1,19 @@
 ## Why
 
-The current branch already extends `team-workflow` across runtime state,
-multi-agent handoff, and public protocol surfaces, but the surrounding
-development loop is still fragile. We need a documented and enforceable
-research and development loop so design, development, and review can keep
-iterating on the same workflow direction without losing context across
-compaction, handoff, or Windows-local test runs.
+The repository already contains substantial `team-workflow` runtime behavior, but the next iteration still lacks a formal change contract that ties governance, handoff boundaries, recovery artifacts, and Windows-local validation into one review-first development loop. This change is needed now to prevent design, development, and review from drifting apart while the implementation is actively evolving.
 
 ## What Changes
 
-- Define the operating contract for the active `team-workflow` direction so
-  every substantive cycle includes explicit design, development, and review
-  participation.
-- Require the active phase, assumptions, blockers, and next step to be
-  recoverable from committed repository artifacts before implementation and
-  after compaction.
-- Stabilize the current `team-workflow` line around sanitized vertical
-  artifact handoff, reviewable same-level manifests, and root-safe public
-  workflow visibility.
-- Record the Windows-local development baseline for this change line,
-  including Python virtual environment usage, direct `cargo` fallbacks,
-  targeted validation, and cleanup hygiene.
+- Formalize the current `team-workflow` direction as an implementation contract before any new code batch starts.
+- Define a governed design-development-review loop with explicit persisted recovery points, role handoffs, and review gates.
+- Define the operator-facing and local-development requirements for Windows-first, no-Docker development using a root-level virtual environment.
+- Establish the validation contract for targeted unit and end-to-end evidence around `team`, `multi_agents`, and workflow protocol behavior.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `team-rd-governance`: Defines the repository-visible
-  design-development-review loop, recovery checkpoints, and review gates for
-  active implementation batches.
-- `team-workflow-governance`: Defines the pre-implementation artifact
-  contract and compact recovery order for `team-workflow` iterations.
-- `team-workflow-handoffs`: Defines reviewable same-level manifests,
-  sanitized vertical artifact handoffs, and root-safe public visibility rules.
-- `team-workflow-hardening`: Defines the bounded runtime and collaboration
-  hardening expectations and the validation evidence required for changed
-  workflow surfaces.
+- `team-workflow-rd-loop`: Defines the governed review-first workflow, persisted recovery artifacts, local Windows development baseline, and verification contract for the current `team-workflow` direction.
 
 ### Modified Capabilities
 
@@ -44,16 +22,27 @@ compaction, handoff, or Windows-local test runs.
 ## Impact
 
 - Affected code:
-  - `codex-rs/core/src/team/*`
-  - `codex-rs/core/src/tools/handlers/multi_agents*`
-  - `codex-rs/app-server-protocol/src/protocol/*`
-- Affected artifacts:
-  - `TEAM_ORCHESTRATION.md`
-  - `CURRENT_STAGE.md`
-  - `LOCAL_DEV_WINDOWS.md`
-  - `openspec/changes/stabilize-team-workflow-rd-loop/*`
+  - `codex-rs/core/src/team/config.rs`
+  - `codex-rs/core/src/team/runtime.rs`
+  - `codex-rs/core/src/team/api.rs`
+  - `codex-rs/core/src/tools/handlers/multi_agents*.rs`
+  - `codex-rs/app-server-protocol/src/protocol/common.rs`
+  - `codex-rs/app-server-protocol/src/protocol/v2.rs`
 - Affected systems:
-  - repository-visible orchestration and recovery workflow
-  - team workflow runtime and recovery state
-  - multi-agent handoff and review boundaries
-  - Windows local validation workflow for this branch
+  - Root-level workflow documentation and compact recovery flow
+  - Windows local development environment and validation path
+  - Team-workflow public visibility, handoff, and review governance
+
+## Planning State
+
+- Active mode: `parallel`
+- Current assumptions:
+  - The current direction remains `team-workflow` hardening rather than a product pivot.
+  - Windows local development without Docker remains the primary execution path for this cycle.
+  - `.venv-tools` remains the baseline Python environment unless implementation forces a new root-level environment.
+- Current blockers:
+  - The exact implementation slice still needs to be narrowed into spec/design/tasks artifacts.
+  - Some `just` recipes are not reliable on the current Windows shell path and require documented `cargo`-first fallbacks.
+  - Full Windows-wide completion criteria still require targeted validation rather than broad suite trust.
+- Next intended step:
+  - Define the normative workflow and local-validation requirements in specs, then convert them into design and tasks.
