@@ -5,6 +5,7 @@
 - Mode: `parallel`
 - Branch: `feature/stabilize-team-workflow-rd-loop`
 - OpenSpec change: `stabilize-team-workflow-rd-loop`
+- OpenSpec status: all required artifacts are complete
 
 ## Current Direction
 
@@ -26,15 +27,15 @@ The current product and code direction is to stabilize the `team-workflow` runti
 ## Current Blockers
 
 - The next bounded implementation slice still needs to be selected from the existing review baseline and task list before coding starts.
-- Root workflow documents still have some duplicate names, so this iteration needs a canonical recovery path that does not depend on stale aliases.
+- Root workflow documents have been canonicalized, but older references may still point to compatibility aliases and should be normalized as code work begins.
 - Some repo recipes depend on POSIX shell execution, so local Windows validation must document cargo-first fallbacks where `just` cannot execute.
 - The full `codex-core` suite is not yet treated as a reliable Windows completion gate; targeted validation remains necessary until the next batch tightens that story.
 
 ## Next Intended Step
 
-1. Finalize the canonical recovery set for this iteration: `TEAM-ORCHESTRATION.md`, `CURRENT-STAGE.md`, `LOCAL-DEV.md`, and `IMPLEMENTATION-REVIEW.md`.
-2. Sync the active OpenSpec artifacts so they reference that same recovery set and the current capability/spec contract.
-3. Assign explicit Design, Development, and Review ownership for the first bounded implementation slice before any coding starts.
+1. Re-read the canonical recovery set for this iteration: `TEAM-ORCHESTRATION.md`, `CURRENT-STAGE.md`, `LOCAL-DEV.md`, and `IMPLEMENTATION-REVIEW.md`.
+2. Re-read the active OpenSpec artifacts under `openspec/changes/stabilize-team-workflow-rd-loop/`.
+3. Choose the first bounded implementation slice from `tasks.md` and assign explicit Design, Development, and Review ownership before any coding starts.
 
 ## Compact Recovery
 
@@ -44,5 +45,6 @@ On resume:
 2. Read `TEAM-ORCHESTRATION.md`.
 3. Read `IMPLEMENTATION-REVIEW.md`.
 4. Read `LOCAL-DEV.md`.
-5. Read the active OpenSpec artifacts for `stabilize-team-workflow-rd-loop`.
-6. Continue from the recorded next step, not hidden chat state.
+5. Treat `TEAM_CHARTER.md` only as a compatibility alias, not the source of truth.
+6. Read the active OpenSpec artifacts for `stabilize-team-workflow-rd-loop`.
+7. Continue from the recorded next step, not hidden chat state.
