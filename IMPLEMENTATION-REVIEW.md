@@ -43,7 +43,7 @@
 - Risk:
   - If child spawn fails after workflow-side preparation, the parent can be left with ghost handoff artifacts that imply a child was created when it was not.
 - Current decision:
-  - Promote this to the next implementation slice, with cleanup-on-failure as the current minimal repair hypothesis.
+  - Promote this to the next implementation slice, with spawn-only two-phase persistence as the current minimal safe repair.
 
 ### P1: `atomicWorkflows` trusted declared checkpoint refs more than persisted files
 
@@ -82,13 +82,13 @@
 
 ## Selected Next Slice
 
-- Slice name: `spawn-agent-failed-handoff-cleanup`
+- Slice name: `spawn-agent-ghost-handoff-artifacts`
 - Reason:
   - `spawn_agent` currently calls `prepare_child_team_spawn` before `spawn_agent_with_metadata` succeeds.
   - `prepare_vertical_handoff` writes the handoff manifest immediately, mirrors artifacts to the operator surface, and can emit an integration patch before the child thread exists.
   - Existing coverage confirms the happy-path manifest contract, but there is not yet a regression test proving failed spawn leaves no ghost handoff artifacts behind.
 - Target behavior:
-  - Failed `spawn_agent` attempts SHALL not leave a new `spawn-*.md` handoff manifest or its operator-visible mirror behind when the child thread was never created.
+  - Failed `spawn_agent` attempts SHALL not leave a new `spawn-*.md` handoff manifest, integration patch, operator-visible mirror, or delegation bookkeeping behind when the child thread was never created.
 - Minimum safe fix boundary:
   - `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs`
   - `codex-rs/core/src/team/runtime.rs`
@@ -98,11 +98,18 @@
   - redesigning the full successful child bootstrap lifecycle
   - broad cleanup of manifest typing or legacy skill migration follow-ups
 
+## Design Decision For The Next Slice
+
+- The safest bounded implementation is a spawn-only two-phase flow:
+  - build sanitized child handoff input in memory
+  - persist the spawn manifest, optional patch, mirrors, and delegation bookkeeping only after `spawn_agent_with_metadata` succeeds
+- Return to design if implementation would require changing the manifest contract itself rather than deferring persistence.
+
 ## Proposed Validation For The Next Slice
 
-- Add a failing-spawn regression under `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` with team workflow enabled and a forced spawn failure, then assert no new `spawn-*.md` artifact remains under the parent team artifact directory.
-- Extend the regression to assert the corresponding operator-visible mirrored artifact is also absent after failure.
-- Re-run the existing successful manifest handoff test so the child still receives the `openspec-artifacts` manifest on the happy path.
+- Add a failing-spawn regression under `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` with team workflow enabled and a forced spawn failure, then assert no new `spawn-*.md` artifact, no integration patch, and no corresponding operator-visible mirrored artifact remain.
+- Extend the regression to assert failed spawn attempts do not add delegation bookkeeping to produced artifacts, audit entries, or delegation tape state.
+- Re-run the existing successful manifest handoff test so the child still receives the `openspec-artifacts` manifest on the happy path and artifacts appear only on success.
 
 ## Validation Executed
 
@@ -140,14 +147,14 @@
 
 ### Design
 
-- Translate the selected next slice into bounded cleanup behavior, non-goals, acceptance criteria, and a focused test plan.
-- Confirm that cleanup-on-failure is sufficient; return to design instead of widening scope if implementation shows the spawn ordering itself must change.
+- Translate the selected next slice into bounded two-phase persistence behavior, non-goals, acceptance criteria, and a focused test plan.
+- Return to design instead of widening scope if implementation shows the broader spawn lifecycle must be reordered beyond the handoff boundary.
 - Keep the next code batch scoped to failed-spawn ghost artifact cleanup instead of reopening broader protocol shape questions.
 
 ### Development
 
 - Commit the bounded implementation plus focused validation evidence without reopening broader workflow hardening work.
-- Keep the next batch centered on failed-spawn ghost artifact cleanup.
+- Keep the next batch centered on failed-spawn ghost artifact elimination.
 
 ### Review
 

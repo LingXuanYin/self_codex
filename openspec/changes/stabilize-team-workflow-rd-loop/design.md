@@ -94,19 +94,19 @@ This batch intentionally does not span every boundary above. The current impleme
   - Focus only on runtime internals.
     - Rejected because public protocol and tool handlers are part of the observed contract.
 
-### Decision: Follow atomic checkpoint hardening with spawn failure cleanup
+### Decision: Follow atomic checkpoint hardening with spawn ghost-artifact hardening
 
 - Decision:
-  - The next implementation batch will keep the current `spawn_agent` handoff preparation flow, but it will remove any newly created spawn-handoff manifest and mirrored operator artifact if child-thread creation fails before `record_child_team_spawn` can bind the handoff to a real child.
+  - The next implementation batch will change the `spawn_agent` bootstrap flow so sanitized child handoff content can be prepared in memory, but spawn manifests, integration patches, mirrored operator files, and delegation bookkeeping are persisted only after `spawn_agent_with_metadata` succeeds.
 - Why:
   - `spawn.rs` currently calls `prepare_child_team_spawn` before `spawn_agent_with_metadata`.
   - `prepare_child_team_spawn` delegates to `prepare_vertical_handoff`, which writes a manifest to disk and mirrors operator-visible files immediately.
   - If the spawn attempt then fails, the repository can retain a fresh spawn handoff artifact that implies a child was created when no child exists.
 - Alternatives considered:
+  - Delete newly created spawn artifacts only on failure.
+    - Rejected as the primary design because it is harder to bound correctly around shared checkpoint files and mirrored operator paths.
   - Reorder agent creation so the child thread is spawned before any handoff preparation runs.
     - Rejected for this batch because the current agent-control API sends the initial input during spawn, so a full sequencing rewrite crosses a wider handler/runtime boundary.
-  - Keep the current behavior and rely on review docs to explain the orphaned manifest.
-    - Rejected because stale spawn manifests undermine artifact-first recovery and operator trust.
 
 ### Decision: Prefer targeted verification on Windows before broader suites
 
@@ -120,16 +120,16 @@ This batch intentionally does not span every boundary above. The current impleme
 
 ## Risks / Trade-offs
 
-- [Large runtime hotspot] -> Mitigation: keep the batch scoped to the existing checkpoint gate, and only extract a helper if the existence check becomes materially more complex.
+- [Large runtime hotspot] -> Mitigation: keep the batch scoped to spawn bootstrap and only extract helpers if a clear side-effect-free preview step is needed.
 - [Windows shell drift for `just` workflows] -> Mitigation: document exact fallback command patterns and isolate the impact in `LOCAL-DEV.md`.
 - [Spec/doc drift from implementation] -> Mitigation: treat proposal/specs/design/tasks as preconditions for coding and update them before any scope change.
-- [Ghost spawn artifacts after failed child creation] -> Mitigation: add a focused failure-path test that proves no new spawn manifest survives a spawn failure under team workflow mode.
+- [Ghost spawn artifacts after failed child creation] -> Mitigation: add a focused failure-path test that proves no new spawn manifest, patch, or mirror survives a spawn failure under team workflow mode.
 
 ## Migration Plan
 
 1. Commit repo-root workflow and recovery docs.
 2. Commit OpenSpec artifacts that define the selected first slice and its testable requirements.
-3. Implement spawn-failure cleanup for prepared child handoff artifacts in `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs` and `codex-rs/core/src/team/runtime.rs`.
+3. Implement spawn-only two-phase handoff persistence across `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs` and `codex-rs/core/src/team/runtime.rs`.
 4. Add focused regression coverage in `codex-rs/core/src/tools/handlers/multi_agents_tests.rs`.
 5. Run focused crate tests, then required end-to-end checks.
 6. Perform review against committed docs plus test evidence.
@@ -143,16 +143,16 @@ Rollback strategy:
 
 ## Open Questions
 
-- Should the spawn cleanup stay as a handler-local rollback or move into a reusable team-runtime helper for other pre-delivery failure paths?
+- Should the side-effect-free spawn preview step stay local to `spawn.rs` or move into a reusable team-runtime helper for other pre-delivery failure paths?
 - Which additional handoff lifecycle regressions should become follow-on slices after spawn-failure cleanup lands?
 - Which end-to-end scenarios are the minimum credible set for Windows in this environment without overfitting to local shell constraints?
 
 ## Acceptance Criteria
 
-- When `spawn_agent` runs under team-workflow mode and child creation fails after `prepare_child_team_spawn`, the repository does not retain a fresh spawn manifest or mirrored operator artifact that implies a child team was created.
+- A rejected or failed `spawn_agent` attempt leaves no new `spawn-*.md`, integration patch, or mirrored spawn artifact behind.
+- Failed spawn attempts do not add `produced_artifacts`, delegation audit entries, or delegation tape entries.
 - Existing success behavior remains intact: successful `spawn_agent` calls still deliver the artifact manifest input to the child and still record the delegation through the normal workflow path.
 - The implementation does not reorder the broader spawn lifecycle or change same-level/vertical messaging contracts in this batch.
-- Focused tests cover at least one spawn-failure cleanup regression and one successful spawn regression.
 
 ## File Boundary
 
@@ -167,9 +167,9 @@ Rollback strategy:
 
 ## Test Plan
 
-1. Add or update a focused `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` case that enables team workflow, forces `spawn_agent` to fail after `prepare_child_team_spawn`, and asserts no new spawn manifest remains under the team artifact directory or operator mirror.
-2. Re-run the existing successful spawn manifest test so the cleanup path does not break valid child handoff delivery.
-3. Re-run the existing depth-limit or manager-unavailable failure coverage if it becomes the chosen failure trigger for the cleanup regression.
+1. Add or update a focused `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` case that enables team workflow, forces `spawn_agent` to fail after preview preparation, and asserts no new spawn manifest, patch, or operator mirror remains.
+2. Extend the failure-path coverage to assert no delegation bookkeeping is recorded when child spawn never succeeds.
+3. Re-run the existing successful spawn manifest test so the two-phase path does not break valid child handoff delivery.
 4. Run targeted `codex-core` tests on Windows using the documented `.venv-tools` environment, then broaden only if the results justify it.
 
 ## Planning State
@@ -180,7 +180,7 @@ Rollback strategy:
   - Windows local development without Docker remains the primary execution path.
   - `.venv-tools` remains the baseline root-level Python environment unless implementation proves otherwise.
 - Current blockers:
-  - The next code batch must stay scoped to failed-spawn ghost handoff cleanup and avoid reopening wider protocol or public-session issues.
+- The next code batch must stay scoped to failed-spawn ghost handoff elimination and avoid reopening wider protocol or public-session issues.
   - Some repo recipes remain constrained by POSIX-shell expectations on Windows.
   - Broad Windows-wide completion criteria remain less trustworthy than targeted test evidence.
 - Next intended step:
