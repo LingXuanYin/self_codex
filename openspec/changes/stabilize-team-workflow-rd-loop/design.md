@@ -13,7 +13,7 @@ This iteration must start from a document-first workflow because the user explic
 The repository already has a natural technical split:
 
 - governance and recovery policy in `team/config.rs`, `team/state.rs`,
-  `.codex/AGENT_TEAM.md`, `.codex/team-workflow.yaml`, and `LOCAL_ENV.md`
+  `TEAM_ORCHESTRATION.md`, `CURRENT_STAGE.md`, and `LOCAL_DEV_WINDOWS.md`
 - runtime orchestration in `team/runtime.rs`
 - operator/public projection in `team/api.rs`
 - tool-surface enforcement in `tools/handlers/multi_agents/*`
@@ -52,15 +52,18 @@ The repository already has a natural technical split:
   - Rely on chat context alone.
     - Rejected because it fails the compact-recovery requirement.
 
-### Decision: Keep one OpenSpec change with one focused capability
+### Decision: Keep one OpenSpec change with four tightly related capabilities
 
 - Decision:
-  - Use one change, `stabilize-team-workflow-rd-loop`, with one focused
-    capability that covers the triad loop, recovery surface, and handoff
-    expectations for the active `team-workflow` line.
+  - Use one change, `stabilize-team-workflow-rd-loop`, with four focused
+    capabilities:
+    - `team-rd-governance`
+    - `team-workflow-governance`
+    - `team-workflow-handoffs`
+    - `team-workflow-hardening`
 - Why:
-  - Governance, recovery, and handoffs are coupled in implementation and can
-    be tested as one bounded workflow capability in this batch.
+  - Governance, recovery, handoffs, and validation are coupled in
+    implementation but still benefit from separate requirement buckets.
 - Alternatives considered:
   - Split governance and handoffs into separate changes.
     - Rejected because the same iteration must review the entire design/development/review loop together.
@@ -101,7 +104,7 @@ The repository already has a natural technical split:
 ## Risks / Trade-offs
 
 - [Large runtime hotspot] -> Mitigation: keep new logic out of `team/runtime.rs` unless the behavior truly belongs there; prefer focused helper modules if implementation grows.
-- [Windows shell drift for `just` workflows] -> Mitigation: document exact fallback command patterns and isolate the impact in `LOCAL_ENV.md`.
+- [Windows shell drift for `just` workflows] -> Mitigation: document exact fallback command patterns and isolate the impact in `LOCAL_DEV_WINDOWS.md`.
 - [Spec/doc drift from implementation] -> Mitigation: treat proposal/specs/design/tasks as preconditions for coding and update them before any scope change.
 - [Protocol/runtime mismatch] -> Mitigation: pair core tests with `codex-app-server-protocol` validation and targeted end-to-end checks.
 
