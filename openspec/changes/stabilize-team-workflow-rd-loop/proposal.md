@@ -1,33 +1,19 @@
 ## Why
 
-The current branch is already moving toward a role-aware team workflow, but
-the development loop is still too dependent on hidden session context and
-operator memory. We need a committed, reviewable contract for how design,
-development, and review participate in each cycle, how Windows-local
-development is bootstrapped, and how work recovers after compact or handoff.
+The current branch already extends `team-workflow` across runtime state, multi-agent handoff, and public protocol surfaces, but the development loop around that work is still fragile. We need a documented and enforceable research and development loop so design, development, and review can iterate on the same workflow direction without losing context across compaction, handoff, or Windows-local test runs.
 
 ## What Changes
 
-- Add committed governance artifacts that define the team charter, role
-  responsibilities, communication rules, recovery order, and Windows-local
-  environment constraints for this workflow.
-- Define an explicit triad loop in which design, development, and review must
-  all participate in each substantive cycle, with clear return-to-design and
-  return-to-development paths.
-- Establish committed OpenSpec artifacts that describe the current direction,
-  implementation approach, test strategy, and iteration tasks before coding
-  continues.
-- Implement and validate the next `team-workflow` stabilization slices against
-  those artifacts, including unit coverage and targeted end-to-end coverage on
-  Windows without Docker.
+- Define the operating contract for the active `team-workflow` direction so every work cycle includes design, development, and review participation.
+- Require the active phase, assumptions, blockers, and next step to be recoverable from versioned artifacts before implementation and before resuming after compaction.
+- Stabilize the current `team-workflow` change line around artifact-based vertical handoff, reviewability, and operator-visible recovery inputs.
+- Document the Windows local development baseline for this change line, including Python virtual environment usage, direct `cargo` fallbacks, and test resource hygiene.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `team-rd-workflow`: Governs the triad-based research and development loop,
-  artifact-backed recovery, Windows-local execution constraints, and validation
-  expectations for the current `team-workflow` direction.
+- `team-workflow-rd-loop`: Defines the required design-development-review cycle, compact recovery checkpoints, and artifact-backed handoff expectations for the active `team-workflow` implementation line.
 
 ### Modified Capabilities
 
@@ -35,11 +21,15 @@ development is bootstrapped, and how work recovers after compact or handoff.
 
 ## Impact
 
-- Governance and recovery artifacts under the repo-root workflow area
-  (`.codex/` and root Markdown docs)
-- OpenSpec artifacts under
-  `openspec/changes/stabilize-team-workflow-rd-loop/`
-- Team workflow runtime and state handling in `codex-rs/core/src/team/`
-- Multi-agent coordination and handoff behavior in
-  `codex-rs/core/src/tools/handlers/multi_agents*`
-- Related protocol, public-session, unit, and targeted end-to-end test coverage
+- Affected code:
+  - `codex-rs/core/src/team/*`
+  - `codex-rs/core/src/tools/handlers/multi_agents*`
+  - `codex-rs/app-server-protocol/src/protocol/*`
+- Affected artifacts:
+  - `TEAM_ORCHESTRATION.md`
+  - `LOCAL_DEV_WINDOWS.md`
+  - `openspec/changes/stabilize-team-workflow-rd-loop/*`
+- Affected systems:
+  - team workflow runtime and recovery state
+  - multi-agent handoff and review boundaries
+  - Windows local validation workflow for this branch
