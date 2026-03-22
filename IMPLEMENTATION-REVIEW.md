@@ -31,6 +31,9 @@
 - `codex-rs/core/src/team/tests.rs` now covers both the positive persisted-checkpoint path and the negative manifest-deletion regression.
 - Root team initialization now regenerates runtime-owned `SKILL.md` files with valid frontmatter-first layout and preserves broken legacy skill content under a marker instead of overwriting it.
 - Windows-sensitive `control` and `multi_agents` tests now use safer local cwd handling so the targeted validation set is viable after the rebase.
+- `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs` now keeps the depth-limit rejection ahead of team-workflow handoff preparation and removes the cleanup-after-failure path.
+- `codex-rs/core/src/team/runtime.rs` now splits vertical spawn handoff work into side-effect-free preparation plus post-spawn persistence, so manifests and optional integration patches are only written after child creation succeeds.
+- `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` now verifies failed spawn leaves both persisted state and artifact files unchanged, depth-limit rejection stays side-effect free, and the happy path still delivers the manifest contract.
 
 ## Prioritized Findings
 
@@ -43,7 +46,7 @@
 - Risk:
   - If child spawn fails after workflow-side preparation, the parent can be left with ghost handoff artifacts that imply a child was created when it was not.
 - Current decision:
-  - Promote this to the next implementation slice, with spawn-only two-phase persistence as the current minimal safe repair.
+  - Closed in the current working tree with spawn-only two-phase persistence.
 
 ### P1: `atomicWorkflows` trusted declared checkpoint refs more than persisted files
 
@@ -104,12 +107,17 @@
   - build sanitized child handoff input in memory
   - persist the spawn manifest, optional patch, mirrors, and delegation bookkeeping only after `spawn_agent_with_metadata` succeeds
 - Return to design if implementation would require changing the manifest contract itself rather than deferring persistence.
+- Keep post-spawn `record_child_team_spawn` compensation out of scope for this batch unless the bounded two-phase path cannot be completed without it.
 
 ## Proposed Validation For The Next Slice
 
 - Add a failing-spawn regression under `codex-rs/core/src/tools/handlers/multi_agents_tests.rs` with team workflow enabled and a forced spawn failure, then assert no new `spawn-*.md` artifact, no integration patch, and no corresponding operator-visible mirrored artifact remain.
 - Extend the regression to assert failed spawn attempts do not add delegation bookkeeping to produced artifacts, audit entries, or delegation tape state.
 - Re-run the existing successful manifest handoff test so the child still receives the `openspec-artifacts` manifest on the happy path and artifacts appear only on success.
+
+## Open Review Risk For Later
+
+- A later slice should revisit the case where child spawn succeeds but `record_child_team_spawn` fails afterward. That compensation window is real, but it is not the primary repair target for the current ghost-artifact slice.
 
 ## Validation Executed
 
@@ -126,6 +134,9 @@
 - `cargo test -p codex-core spawn_agent_can_fork_parent_thread_history`
 - `cargo test -p codex-core resume_closed_child_reopens_open_descendants`
 - `cargo test -p codex-core resume_agent_from_rollout_reads_archived_rollout_path`
+- `cargo test -p codex-core failed_team_workflow_spawn_does_not_persist_handoff_artifacts`
+- `cargo test -p codex-core team_workflow_spawn_depth_limit_does_not_prepare_handoff_artifacts`
+- `cargo test -p codex-core spawn_agent_uses_artifact_manifest_for_team_workflow_child_handoff`
 - `cargo clippy --fix --tests --allow-dirty -p codex-core`
 - `cargo fmt`
 - `tools/argument-comment-lint/run.sh -p codex-core` via Git Bash with `.venv-tools`
@@ -133,15 +144,16 @@
 ## Residual Risks
 
 - The handoff manifest is still inferred from `prepared.artifact_refs.first()` instead of a typed field. That ordering contract is stable enough for this slice but should become explicit in a follow-up change.
+- Child creation can still succeed before a later `record_child_team_spawn` failure. That compensation window is real, but it is explicitly deferred outside this slice.
 - Legacy skill repair preserves broken content under a marker rather than structurally migrating it. That fixes the current loader failure but may leave duplicated legacy guidance for later cleanup.
 - `just` is still not a reliable Windows completion gate because the local shell resolution is incomplete; this cycle depended on `cargo` fallbacks and Git Bash for the linter wrapper.
 - Full `cargo test -p codex-core` was not re-established as the Windows-wide completion gate for this slice. The accepted evidence remains the targeted test set above.
 
 ## Review Outcome
 
-- Design confirmed the slice should stay bounded to the exact six-checkpoint contract and that OpenSpec wording must enumerate the checkpoint set explicitly.
-- Development completed the runtime enforcement, focused tests, skill-wrapper repair, and Windows-targeted test stabilization within the bounded scope.
-- Review found no remaining blocker in the implemented areas. The remaining items are follow-up risks, not reasons to return this slice to development.
+- Design confirmed the slice should stay bounded to spawn-only two-phase persistence and should not widen into a broader agent lifecycle redesign.
+- Development completed the bounded `spawn_agent` and `team/runtime.rs` refactor plus focused `multi_agents` regression coverage within that boundary.
+- Review found no blocker that requires returning this slice to design or development. The remaining items are follow-up risks, not release blockers for this repair.
 
 ## Role Boundaries For The Next Iteration
 
