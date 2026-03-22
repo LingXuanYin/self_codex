@@ -17,7 +17,7 @@ The current product and code direction is to stabilize the `team-workflow` runti
 - `codex-rs/core/src/team/runtime.rs` remains the primary orchestration surface for team state, handoff shaping, runtime docs, and operator-visible artifacts.
 - `codex-rs/core/src/tools/handlers/multi_agents*.rs` remains the primary integration surface for `spawn_agent`, `send_input`, and `resume_agent`; Windows-targeted tests for the touched paths passed in this cycle.
 - Runtime-generated `.codex/skills/*/SKILL.md` files are now repaired to start with valid YAML frontmatter while preserving legacy content under a marker for manual follow-up if needed.
-- The next deferred defect is now the active slice: `spawn_agent` can write vertical handoff artifacts before child spawn success is known, which can leave ghost handoff manifests and optional patch artifacts behind if spawn fails.
+- The active spawn ghost-artifact slice is now implemented in the working tree: `spawn_agent` prepares sanitized child handoff input in memory and only persists the manifest and optional patch after child spawn succeeds.
 
 ## Current Assumptions
 
@@ -28,9 +28,9 @@ The current product and code direction is to stabilize the `team-workflow` runti
 ## Current Iteration Ownership
 
 - Lead: main Codex thread, responsible for branch ownership, artifact writes, and final integration decisions.
-- Design: sub-agent `Bacon`, which narrowed the next slice to spawn ghost-artifact elimination without reopening the wider spawn lifecycle.
+- Design: delegated analysis completed for the bounded spawn ghost-artifact slice; the lead thread owns final document wording and code integration.
 - Development: main Codex thread for the next code batch, with bounded implementation delegation allowed only after the pre-code document gate is recommitted.
-- Review: `IMPLEMENTATION-REVIEW.md` is the active baseline, and sub-agent `Ptolemy` confirmed the adjacent post-spawn recording window as a follow-up risk rather than the primary boundary for this batch.
+- Review: `IMPLEMENTATION-REVIEW.md` is the active baseline, and the current review outcome keeps the later post-spawn recording window as a follow-up risk rather than a blocker for this batch.
 
 ## Selected Next Slice
 
@@ -53,17 +53,17 @@ The current product and code direction is to stabilize the `team-workflow` runti
 
 - `just` recipes that assume a POSIX shell are still not reliable on this Windows machine; this cycle used `cargo clippy --fix` and Git Bash for `argument-comment-lint` as documented fallbacks.
 - The full `codex-core` suite is still not treated as a reliable Windows completion gate; targeted validation remains necessary until the next batch tightens that story.
-- `spawn_agent` currently calls `prepare_child_team_spawn` before child creation succeeds; `prepare_vertical_handoff` still performs persistence side effects too early in the current worktree and is the active compile blocker for this slice.
-- The current design assumption is a spawn-only two-phase handoff flow: prepare sanitized child input in memory first, then persist the manifest, optional patch, mirrors, and delegation bookkeeping only after child spawn success is known.
-- Review identified a deeper post-spawn `record_child_team_spawn` failure window, but that compensation problem is explicitly deferred unless the bounded two-phase fix proves insufficient.
+- The current implementation still lives alongside unrelated dirty worktree noise in `codex-rs/app-server/src/codex_message_processor.rs`, `codex-rs/core/src/team/api.rs`, and `codex-rs/core/src/thread_manager.rs`; those changes are outside this slice and must stay out of the final handoff or commit.
+- The current design assumption remains a spawn-only two-phase handoff flow: prepare sanitized child input in memory first, then persist the manifest, optional patch, mirrors, and delegation bookkeeping only after child spawn success is known.
+- Review identified a deeper post-spawn `record_child_team_spawn` failure window, but that compensation problem is explicitly deferred to a later slice.
 - The handoff manifest is still identified by `prepared.artifact_refs.first()` rather than a typed field; that ordering assumption remains a low follow-up risk rather than a blocker for this slice.
 - Legacy skill repair currently preserves prior content under a marker rather than migrating it structurally; that is acceptable for loader recovery but remains a follow-up cleanup candidate.
 
 ## Next Intended Step
 
-1. Commit the updated OpenSpec and root recovery documents for the `spawn-agent-ghost-handoff-artifacts` slice.
-2. Implement a bounded two-phase spawn handoff path in `spawn.rs` and `runtime.rs` so persistence happens only after child spawn success.
-3. Run targeted Windows validation on the touched `codex-core` paths, then record the review outcome and remaining risks.
+1. Isolate the bounded spawn ghost-artifact code and documentation changes from unrelated dirty worktree noise.
+2. Commit the updated OpenSpec and repo-root recovery documents together with the bounded Rust implementation for this slice.
+3. Push the branch and hand off the remaining follow-up risks from `IMPLEMENTATION-REVIEW.md` into the next iteration plan.
 
 ## Compact Recovery
 
